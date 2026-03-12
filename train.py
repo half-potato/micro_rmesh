@@ -53,7 +53,7 @@ args.vertices_lr_delay_multi = 1e-8
 args.delaunay_interval = 100
 
 # Distortion Settings
-args.lambda_dist = 0.001
+args.lambda_dist = 0.01
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
