@@ -74,7 +74,7 @@ args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.3
 args.lambda_ssim_bw = 0.15
-args.min_t = 0.4
+args.min_t = 0.3
 args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.1
@@ -173,12 +173,11 @@ while True:
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg.get('distortion_loss', 0.0)
-    dist_weight = args.lambda_dist * min(1.0, max(0.0, (step - 2000) / 1000))
     loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
            args.lambda_opacity * (1-render_pkg['alpha']).mean() + \
-           dist_weight * dl_loss
+           args.lambda_dist * dl_loss
     if args.lambda_ssim_bw > 0:
         bw_weights = torch.tensor([0.2989, 0.5870, 0.1140], device=image.device).view(3, 1, 1)
         image_bw = (image * bw_weights).sum(dim=0, keepdim=True)
