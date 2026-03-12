@@ -50,7 +50,7 @@ args.vert_lr_delay = 0
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
-args.delaunay_interval = 200
+args.delaunay_interval = 300
 
 # Distortion Settings
 args.lambda_dist = 0.0
