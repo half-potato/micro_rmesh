@@ -115,6 +115,7 @@ tet_optim = TetOptimizer(model, **args.as_dict())
 
 images = []
 psnrs = []
+entropies = []
 inds = list(range(len(train_cameras)))
 random.shuffle(inds)
 
@@ -151,10 +152,12 @@ while True:
             high_precision=False)
 
     if len(inds) == 0:
-        print(f"TRAIN PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
+        avg_entropy = sum(entropies)/len(entropies) if entropies else 0.0
+        print(f"TRAIN PSNR: {sum(psnrs)/len(psnrs):.2f} ENTROPY: {avg_entropy:.4f} #V: {len(model)} #T: {model.indices.shape[0]}")
         inds = list(range(len(train_cameras)))
         random.shuffle(inds)
         psnrs = []
+        entropies = []
     ind = inds.pop()
     camera = train_cameras[ind]
     target = camera.original_image.cuda()
@@ -258,6 +261,7 @@ while True:
 
     psnr = -20 * math.log10(math.sqrt(l2_loss.detach().cpu().clip(min=1e-6).item()))
     psnrs.append(psnr)
+    entropies.append(dl_loss.detach().cpu().item() if torch.is_tensor(dl_loss) else dl_loss)
 
     if step == 0:
         gc.collect()

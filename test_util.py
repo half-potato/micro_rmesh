@@ -33,7 +33,7 @@ def evaluate(model, splits, output_path, tile_size, min_t, save=True):
     results = {}
     for split, cameras in splits:
         renders, gts = [], []
-        ssims, psnrs, lpipss = [], [], []
+        ssims, psnrs, lpipss, entropy_vals = [], [], [], []
         if save:
             os.makedirs(os.path.join(gt_path, split), exist_ok=True)
             os.makedirs(os.path.join(pred_path, split), exist_ok=True)
@@ -52,6 +52,7 @@ def evaluate(model, splits, output_path, tile_size, min_t, save=True):
                 ssim_val = fused_ssim(image, gt).item()
                 psnr_val = psnr(image, gt).item()
                 lpips_val = lpips_eval.criterion(2 * image - 1, 2 * gt - 1).item()
+                entropy_val = render_pkg.get('distortion_loss', torch.tensor(0.0)).item() if torch.is_tensor(render_pkg.get('distortion_loss', 0.0)) else render_pkg.get('distortion_loss', 0.0)
                 
                 # Store results
                 renders.append(image)
@@ -59,6 +60,7 @@ def evaluate(model, splits, output_path, tile_size, min_t, save=True):
                 ssims.append(ssim_val)
                 psnrs.append(psnr_val)
                 lpipss.append(lpips_val)
+                entropy_vals.append(entropy_val)
                 
                 # Save individual images
                 if save:
@@ -66,19 +68,21 @@ def evaluate(model, splits, output_path, tile_size, min_t, save=True):
                     imageio.imwrite(os.path.join(gt_path, split, f"{idx:04d}.png"), (gt.cpu()[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8))
                 
                 # Save per-image metrics
-                results[f"{split}_{idx:04d}"] = {"SSIM": ssim_val, "PSNR": psnr_val, "LPIPS": lpips_val}
+                results[f"{split}_{idx:04d}"] = {"SSIM": ssim_val, "PSNR": psnr_val, "LPIPS": lpips_val, "ENTROPY": entropy_val}
         
         means = {
             "SSIM": torch.tensor(ssims).mean().item(),
             "PSNR": torch.tensor(psnrs).mean().item(),
-            "LPIPS": torch.tensor(lpipss).mean().item()
+            "LPIPS": torch.tensor(lpipss).mean().item(),
+            "ENTROPY": torch.tensor(entropy_vals).mean().item()
         }
         # Compute mean metrics
         results[f"{split}_mean"] = means
         short_results = {**short_results,
             f"{split}_SSIM": torch.tensor(ssims).mean().item(),
             f"{split}_PSNR": torch.tensor(psnrs).mean().item(),
-            f"{split}_LPIPS": torch.tensor(lpipss).mean().item()
+            f"{split}_LPIPS": torch.tensor(lpipss).mean().item(),
+            f"{split}_ENTROPY": torch.tensor(entropy_vals).mean().item()
         }
         
     return short_results

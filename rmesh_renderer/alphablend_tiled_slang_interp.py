@@ -13,8 +13,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                 indices, vertices, cell_values, render_grid,
                 tcam, ray_jitter, aux_dim, device="cuda"
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        distortion_img = torch.zeros((render_grid.image_height, 
-                                  render_grid.image_width, 5), 
+        distortion_img = torch.zeros((render_grid.image_height,
+                                  render_grid.image_width, 8),
                                  device=device)
         output_img = torch.zeros((render_grid.image_height, 
                                   render_grid.image_width, 4 + aux_dim), 

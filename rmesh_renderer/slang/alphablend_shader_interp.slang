@@ -11,12 +11,11 @@ static const uint TILE_WIDTH = PYTHON_TILE_WIDTH;
 groupshared SplatTetrahedra_interp collected_splats[TILE_HEIGHT * TILE_WIDTH];
 groupshared uint32_t collected_idx[TILE_HEIGHT * TILE_WIDTH];
 
-struct DistortionState5 : IDifferentiable {
-    float x;
-    float y;
-    float z;
-    float w;
-    float v;
+struct EntropyState : IDifferentiable {
+    float sum_w;
+    float sum_wlogw;
+    float3 sum_wc;
+    float3 sum_wc_logwc;
 };
 
 [Differentiable]
@@ -36,64 +35,48 @@ float safe_exp4alpha(float x) {
 }
 
 [Differentiable]
-float moment_0_int(float a, float b, float s1, float T) {
-    return s1;
-}
-[Differentiable]
-float moment_1_int(float a, float b, float s1, float T) {
-    return s1 * (b+a)/2;
-}
-[Differentiable]
-float self_dist(float a, float b, float s, float T) {
-    float dt = max(b - a, 0);
-    return s*s*dt/3;
-}
-
-[Differentiable]
-DistortionState5 update_distortion_state(
-    DistortionState5 old_state,
+EntropyState update_entropy_state(
+    EntropyState old_state,
     float T,
     float density,
-    float2 dist)
+    float2 dist,
+    float3 color)
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
+    float dt = max(end - start, 0);
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    float w = alpha * T;
+    float3 wc = color * T;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
-
-    DistortionState5 new_state;
-    new_state.x = old_state.x + 2.0f * m1 * old_state.z;
-    new_state.y = old_state.y + 2.0f * m0 * old_state.w;
-    new_state.z = old_state.z + m0;
-    new_state.w = old_state.w + m1;
-    new_state.v = old_state.v + self_dist(start, end, d, T);
+    EntropyState new_state;
+    new_state.sum_w = old_state.sum_w + w;
+    new_state.sum_wlogw = old_state.sum_wlogw + w * log(max(w, 1e-6f));
+    new_state.sum_wc = old_state.sum_wc + wc;
+    new_state.sum_wc_logwc = old_state.sum_wc_logwc + wc * log(max(wc, float3(1e-6f)));
 
     return new_state;
 }
 
-DistortionState5 undo_distortion_state(
-    DistortionState5 new_state,
+EntropyState undo_entropy_state(
+    EntropyState new_state,
     float T,
     float density,
-    float2 dist)
+    float2 dist,
+    float3 color)
 {
     float start = dist.x;
     float end = max(dist.x, dist.y);
-    float scaling = 1;
-    float d = density;
+    float dt = max(end - start, 0);
+    float alpha = max(1.0f - safe_exp(-density * dt), 0);
+    float w = alpha * T;
+    float3 wc = color * T;
 
-    float m0 = moment_0_int(start, end, d, T);
-    float m1 = moment_1_int(start, end, d, T);
-
-    DistortionState5 old_state;
-    old_state.z = new_state.z - m0;
-    old_state.w = new_state.w - m1;
-    old_state.x = new_state.x - 2.0f * m1 * old_state.z;
-    old_state.y = new_state.y - 2.0f * m0 * old_state.w;
-    old_state.v = new_state.v - self_dist(start, end, d, T);
+    EntropyState old_state;
+    old_state.sum_w = new_state.sum_w - w;
+    old_state.sum_wlogw = new_state.sum_wlogw - w * log(max(w, 1e-6f));
+    old_state.sum_wc = new_state.sum_wc - wc;
+    old_state.sum_wc_logwc = new_state.sum_wc_logwc - wc * log(max(wc, float3(1e-6f)));
     return old_state;
 }
 
@@ -128,7 +111,7 @@ float4 undo_xyzd_state(in float4 next_xyzd, in float4 ctrl_xyzd, in float T) {
 
 struct AlphaOut: IDifferentiable {
     float4 rgba;
-    DistortionState5 distortion_state;
+    EntropyState distortion_state;
     float4 xyzd;
     float aux[AUX_DIM];
 };
@@ -137,7 +120,10 @@ struct AlphaOut: IDifferentiable {
 AlphaOut get_empty_alpha_out() {
     AlphaOut ao;
     ao.rgba = float4(0.f);
-    ao.distortion_state = {0.f, 0.f, 0.f, 0.f, 0.f};
+    ao.distortion_state.sum_w = 0.f;
+    ao.distortion_state.sum_wlogw = 0.f;
+    ao.distortion_state.sum_wc = float3(0.f);
+    ao.distortion_state.sum_wc_logwc = float3(0.f);
     ao.xyzd = float4(0.f);
     
     [ForceUnroll]
@@ -153,7 +139,7 @@ AlphaOut update_alpha_out(AlphaOut prev, CtrlPt ctrl) {
 
     AlphaOut res;
     res.rgba = update_pixel_state(prev.rgba, ctrl.rgba);
-    res.distortion_state = update_distortion_state(prev.distortion_state, T, ctrl.density, ctrl.dist);
+    res.distortion_state = update_entropy_state(prev.distortion_state, T, ctrl.density, ctrl.dist, ctrl.rgba.rgb);
     res.xyzd = update_xyzd_state(prev.xyzd, ctrl.xyzd, T);
 
     // 2. Accumulate Aux (Standard Alpha Blending)
@@ -171,7 +157,7 @@ AlphaOut undo_alpha_out(AlphaOut curr, CtrlPt ctrl) {
 
     AlphaOut res;
     res.rgba = pix_state;
-    res.distortion_state = undo_distortion_state(curr.distortion_state, T, ctrl.density, ctrl.dist);
+    res.distortion_state = undo_entropy_state(curr.distortion_state, T, ctrl.density, ctrl.dist, ctrl.rgba.rgb);
     res.xyzd = undo_xyzd_state(curr.xyzd, ctrl.xyzd, T);
 
     // 3. Undo Aux
@@ -286,11 +272,14 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     AlphaOut ao = get_empty_alpha_out();
 
     if (is_inside) {
-        ao.distortion_state = {final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
-            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
-            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
-            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)],
-            final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4)]};
+        ao.distortion_state.sum_w = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)];
+        ao.distortion_state.sum_wlogw = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)];
+        ao.distortion_state.sum_wc.x = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)];
+        ao.distortion_state.sum_wc.y = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)];
+        ao.distortion_state.sum_wc.z = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4)];
+        ao.distortion_state.sum_wc_logwc.x = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 5)];
+        ao.distortion_state.sum_wc_logwc.y = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 6)];
+        ao.distortion_state.sum_wc_logwc.z = final_distortion_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 7)];
         ao.rgba = float4(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
                          final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
                          final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
@@ -430,11 +419,14 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
         xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.xyzd.z);
         xyzd_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.xyzd.a);
 
-        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.distortion_state.x);
-        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.distortion_state.y);
-        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.distortion_state.z);
-        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.distortion_state.w);
-        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), pixel_states.distortion_state.v);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_states.distortion_state.sum_w);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_states.distortion_state.sum_wlogw);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_states.distortion_state.sum_wc.x);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_states.distortion_state.sum_wc.y);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), pixel_states.distortion_state.sum_wc.z);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 5), pixel_states.distortion_state.sum_wc_logwc.x);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 6), pixel_states.distortion_state.sum_wc_logwc.y);
+        distortion_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 7), pixel_states.distortion_state.sum_wc_logwc.z);
     }
 }
 

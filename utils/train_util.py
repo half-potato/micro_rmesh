@@ -58,8 +58,17 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         ray_jitter,
         model.additional_attr)
     alpha = image_rgb.permute(2,0,1)[3, ...].exp()
-    total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
-    distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
+    # Scalar ray weight entropy
+    sum_w = distortion_img[:, :, 0].clip(min=1e-6)
+    sum_wlogw = distortion_img[:, :, 1]
+    scalar_entropy = (sum_w.log() - sum_wlogw / sum_w).clip(min=0)
+
+    # Color ray weight entropy (per channel, then average)
+    sum_wc = distortion_img[:, :, 2:5].clip(min=1e-6)
+    sum_wc_logwc = distortion_img[:, :, 5:8]
+    color_entropy = (sum_wc.log() - sum_wc_logwc / sum_wc).clip(min=0).mean(dim=-1)
+
+    distortion_loss = scalar_entropy + color_entropy
 
     # unrotate the xyz part of the xyzd_img
     rotated = xyzd_img[..., :3].reshape(-1, 3) @ camera.world_view_transform[:3, :3].to(device)

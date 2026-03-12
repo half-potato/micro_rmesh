@@ -10,8 +10,8 @@ This is an implementation of neural radiance fields represented by a delaunay tr
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `micro_rmesh/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b micro_rmesh/<tag>` from current master.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `floater_/<tag>` must not already exist — this is a fresh run.
+2. **Create the branch**: `git checkout -b floater_/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `train.py` — one of the files you modify. Optimizer, training loop
@@ -28,7 +28,7 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 10 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 10 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `CUDA_VISIBLE_DEVICES=3 uv run train.py`.
 
 **What you CAN do:**
 - Modify `train.py` — training loop, hyperparameters, loss functions, scheduling.
@@ -41,14 +41,14 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CANNOT do:**
 - Modify `data/*`. It is read-only. It contains camera/dataset loading (COLMAP format, intrinsics, extrinsics, images).
-- Modify `rmesh_renderer/*`. It is read-only. It contains the Slang-based tile rendering pipeline and shaders.
+- Modify `rmesh_renderer/*`. It is read-only (except for the entropy changes already made). It contains the Slang-based tile rendering pipeline and shaders.
 - Modify `submodules/*`. It is read-only. It contains the LPIPS metric (`lpipsPyTorch`).
-- Modify `test_util.py`. It is read-only. It contains the evaluation function and the constants `VERT_BUDGET` (500k) and `TIME_BUDGET` (600s).
-- Modify `utils/train_util.py`. It is read-only. It contains the `render()` function.
+- Modify `test_util.py`. It is read-only (except for the entropy tracking already added). It contains the evaluation function and the constants `VERT_BUDGET` (500k) and `TIME_BUDGET` (600s).
+- Modify `utils/train_util.py`. It is read-only (except for the entropy loss already added). It contains the `render()` function.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate` function in `test_util.py` is the ground truth metric.
 
-**The goal is simple: get the highest PSNR.** Since the time budget is fixed, you don't need to worry about training time — it's always 10 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+**The goal has a dual mandate: get the highest PSNR while reducing ray weight entropy.** PSNR measures reconstruction quality; ray weight entropy (lower is better) measures how concentrated vs. diffuse the rendering weights are along each ray — low entropy means sharp surfaces, high entropy means floaters/fog. Since the time budget is fixed, you don't need to worry about training time — it's always 10 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
 
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful PSNR gains, but it should not blow up dramatically.
 
@@ -68,54 +68,61 @@ n_tets: 301245
 test_SSIM: 0.812
 test_PSNR: 20.5
 test_LPIPS: 0.312
+test_ENTROPY: 0.1234
+```
+
+During training, each epoch also prints average ray weight entropy:
+```
+TRAIN PSNR: 20.50 ENTROPY: 0.1500 #V: 51358 #T: 301245
 ```
 
 Note that the script is configured to always stop after 10 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metrics from the log file:
 
 ```
-grep "^test_PSNR:\|^n_vertices:" run.log
+grep "^test_PSNR:\|^test_ENTROPY:\|^n_vertices:" run.log
 ```
 
 ## Logging results
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
 
-The TSV has a header row and 5 columns:
+The TSV has a header row and 6 columns:
 
 ```
-commit	PSNR	n_vertices	status	description
+commit	PSNR	ENTROPY	n_vertices	status	description
 ```
 
 1. git commit hash (short, 7 chars)
 2. PSNR achieved (e.g. 19) — use 0.000000 for crashes
-3. number of vertices in final model
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+3. ENTROPY (average ray weight entropy, lower is better) — use 0.000000 for crashes
+4. number of vertices in final model
+5. status: `keep`, `discard`, or `crash`
+6. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	PSNR	n_vertices	status	description
-02c58f1	20.5	51358	keep	baseline
-b2c3d4e	20.9	51358	keep	increase LR to 0.04
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
+commit	PSNR	ENTROPY	n_vertices	status	description
+02c58f1	20.5	0.1234	51358	keep	baseline
+b2c3d4e	20.9	0.1100	51358	keep	increase LR to 0.04
+d4e5f6g	0.000000	0.000000	0.0	crash	double model width (OOM)
 ```
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `micro_rmesh/mar5` or `micro_rmesh/mar5-gpu0`).
+The experiment runs on a dedicated branch (e.g. `floater_/mar5` or `floater_/mar5-gpu0`).
 
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py, model.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^test_PSNR:\|^n_vertices:" run.log`
+4. Run the experiment: `CUDA_VISIBLE_DEVICES=3 uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+5. Read out the results: `grep "^test_PSNR:\|^test_ENTROPY:\|^n_vertices:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If PSNR improved (higher is better), you "advance" the branch, keeping the git commit
-9. If PSNR is equal or worse, you git reset back to where you started
+8. If the result is a Pareto improvement (PSNR increased or entropy decreased, without the other getting worse), you "advance" the branch, keeping the git commit. When in doubt, prioritize PSNR.
+9. If neither metric improved, you git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
