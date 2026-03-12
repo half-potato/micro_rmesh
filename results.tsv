@@ -2,3 +2,4 @@ commit	PSNR	ENTROPY	n_vertices	status	description
 13434e4	11.4546	7.3515	150786	keep	baseline
 50d34f6	12.9679	6.0831	395753	keep	delaunay_interval 50 + num_samples 50 + densify_start 500 + densify_interval 300
 3d317d7	11.7110	4.2531	283067	discard	freeze_lr 5e-2 + delaunay_interval 100 + densify_interval 500 (LR too high)
+7256a4d	14.2702	6.1644	290563	keep	delaunay_interval 100 + densify_interval 500
