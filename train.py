@@ -50,7 +50,7 @@ args.vert_lr_delay = 0
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
-args.delaunay_interval = 50
+args.delaunay_interval = 100
 
 # Distortion Settings
 args.lambda_dist = 0.0
@@ -65,7 +65,7 @@ args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 500
 args.densify_end = 16000
-args.densify_interval = 300
+args.densify_interval = 500
 
 args.within_thresh = 0.3 / 2.7
 args.total_thresh = 2.0
