@@ -84,9 +84,9 @@ args.threshold_start = 4500
 args.voxel_size = 0.01
 
 # Decimation Settings
-args.decimate_start = 4000
-args.decimate_end = 17000
-args.decimate_interval = 2000
+args.decimate_start = 99999
+args.decimate_end = 99999
+args.decimate_interval = 99999
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
 
@@ -139,7 +139,7 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = step % args.delaunay_interval == 0
-    do_cloning = step in dschedule
+    do_cloning = step in dschedule and total_training_time < test_util.DENSIFICATION_TIME_BUDGET
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
@@ -225,6 +225,7 @@ while True:
 
     if do_cloning:
         with torch.no_grad():
+            psnrs = []
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
 
             gc.collect()
