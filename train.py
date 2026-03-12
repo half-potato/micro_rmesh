@@ -34,7 +34,7 @@ args.resolution = 1
 args.render_train = False
 
 # Light Settings
-args.max_sh_deg = 3
+args.max_sh_deg = 2
 args.sh_interval = 0
 args.sh_step = 1
 

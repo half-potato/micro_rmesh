@@ -4,3 +4,6 @@ commit	PSNR	ENTROPY	n_vertices	status	description
 3d317d7	11.7110	4.2531	283067	discard	freeze_lr 5e-2 + delaunay_interval 100 + densify_interval 500 (LR too high)
 7256a4d	14.2702	6.1644	290563	keep	delaunay_interval 100 + densify_interval 500
 f194e4f	15.1303	6.6772	242408	keep	lambda_dist=0.001 (PSNR up but entropy worse)
+207f6e8	18.2073	5.1810	314608	keep	lambda_dist=0.01 (huge improvement on both)
+df7b781	12.6649	1.7728	94374	discard	lambda_dist=0.05 (too strong - PSNR collapsed)
+80930bb	16.1182	2.8276	215726	discard	lambda_dist=0.02 (PSNR dropped)
