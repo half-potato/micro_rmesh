@@ -1,11 +1,1 @@
 commit	PSNR	ENTROPY	n_vertices	status	description
-13434e4	11.4546	7.3515	150786	keep	baseline
-50d34f6	12.9679	6.0831	395753	keep	delaunay_interval 50 + num_samples 50 + densify_start 500 + densify_interval 300
-7256a4d	14.2702	6.1644	290563	keep	delaunay_interval 100 + densify_interval 500
-207f6e8	18.2073	5.1810	314608	keep	lambda_dist=0.01 (huge improvement on both)
-d191687	19.0737	4.9007	356120	keep	max_sh_deg=2 (Pareto improvement on both)
-796a234	19.0401	4.5577	500000	keep	max_sh_deg=1 (entropy improved)
-b12d2b8	19.2514	4.7972	375600	keep	lambda_ssim_bw=0.3
-ab47646	19.3921	4.5231	463142	keep	custom densify schedule [300 500 800 1200 1700 2300 3000]
-dd37684	19.4965	4.8678	500000	keep	8-round schedule [200 350 550 800 1150 1600 2200 3000]
-1787ce8	19.2527	4.6943	500000	discard	freeze_lr 3.5e-2 (PSNR dropped)
