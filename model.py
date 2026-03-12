@@ -11,19 +11,56 @@ from scipy.spatial import Delaunay
 
 from utils.topo_utils import (
     tet_volumes, calculate_circumcenters_torch,
-    fibonacci_spiral_on_sphere, get_tet_adjacency,
+    fibonacci_spiral_on_sphere,
 )
 from utils.model_util import activate_output, pre_calc_cell_values, offset_normalize, RGB2SH
 from utils.safe_math import safe_exp
-from utils.train_util import get_expon_lr_func, SpikingLR
 from utils import optim
 from utils.args import Args
-from models.base_model import BaseModel
 
 
 # ---------------------------------------------------------------------------
 # Vertex-to-tet adjacency (from experiments/test_field_transfer.py)
 # ---------------------------------------------------------------------------
+def get_expon_lr_func(
+    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+):
+    """
+    Copied from Plenoxels
+
+    Continuous learning rate decay function. Adapted from JaxNeRF
+    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+    is log-linearly interpolated elsewhere (equivalent to exponential decay).
+    If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+    function of lr_delay_mult, such that the initial learning rate is
+    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+    to the normal learning rate when steps>lr_delay_steps.
+    :param conf: config subtree 'lr' or similar
+    :param max_steps: int, the number of steps during optimization.
+    :return HoF which takes step as input
+    """
+    lr_init = max(lr_init, 1e-20)
+    lr_final = max(lr_final, 1e-20)
+
+    def helper(step):
+        if max_steps == 0:
+            return lr_init
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            # Disable this parameter
+            return 0.0
+        if lr_delay_steps > 0:
+            # A kind of reverse cosine decay.
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+            )
+        else:
+            delay_rate = 1.0
+        t = np.clip(step / max_steps, 0, 1)
+        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        return delay_rate * log_lerp
+
+    return helper
+
 
 def build_v2t(indices: torch.Tensor, n_verts: int):
     """Build padded vertex->tet adjacency table.
@@ -321,7 +358,7 @@ def compute_transfer_weights_edge(
 # SimpleModel
 # ===========================================================================
 
-class SimpleModel(BaseModel):
+class SimpleModel(torch.nn.Module):
     """Per-tet parameter model with adjacency-based attribute transfer.
 
     Like FrozenTetModel but with a working update_triangulation() that
@@ -433,6 +470,13 @@ class SimpleModel(BaseModel):
         else:
             return circumcenters, density, rgb, grd, sh
 
+    def __len__(self):
+        return self.vertices.shape[0]
+
+    @property
+    def num_int_verts(self):
+        return self.contracted_vertices.shape[0]
+
     def get_cell_values(
         self,
         camera,
@@ -457,13 +501,6 @@ class SimpleModel(BaseModel):
             self.max_sh_deg,
         )
         return sh, cell_output
-
-    def compute_adjacency(self):
-        vols = tet_volumes(self.vertices[self.indices])
-        reverse_mask = vols < 0
-        if reverse_mask.sum() > 0:
-            self.indices[reverse_mask] = self.indices[reverse_mask][:, [1, 0, 2, 3]]
-        self.faces, self.side_index = get_tet_adjacency(self.indices)
 
     def calc_tet_density(self):
         _, densities, _, _, _, _ = self.compute_batch_features(
@@ -512,7 +549,6 @@ class SimpleModel(BaseModel):
         else:
             v = Del(verts.shape[0])
             indices_np, prev = v.compute(verts.detach().cpu().double())
-            indices_np = indices_np.clone().numpy()
             valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
             indices_np = indices_np[valid_mask.all(axis=1)]
             del prev
@@ -593,7 +629,6 @@ class SimpleModel(BaseModel):
         all_verts = torch.cat([int_vertices, ext_verts], dim=0)
         v = Del(all_verts.shape[0])
         indices_np, prev = v.compute(all_verts.detach().cpu().double())
-        indices_np = indices_np.clone().numpy()
         valid_mask = (indices_np >= 0) & (indices_np < all_verts.shape[0])
         indices_np = indices_np[valid_mask.all(axis=1)]
         del prev
@@ -665,6 +700,54 @@ class SimpleModel(BaseModel):
         model.min_t = config.min_t
         return model
 
+    @torch.no_grad
+    def save2ply(self, path):
+        path.parent.mkdir(exist_ok=True, parents=True)
+
+        xyz = self.vertices.detach().cpu().numpy().astype(np.float32)  # shape (num_vertices, 3)
+
+        vertex_dict = {
+            "x": xyz[:, 0],
+            "y": xyz[:, 1],
+            "z": xyz[:, 2],
+        }
+
+        N = self.indices.shape[0]
+        sh_dim = ((self.max_sh_deg+1)**2-1)
+
+        circumcenters, density, base_color_v0_raw, normed_grd, sh = self.compute_features(offset=True)
+
+        base_color_v0_raw = base_color_v0_raw.cpu().numpy().astype(np.float32)
+        grds = normed_grd.reshape(-1, 3).cpu().numpy().astype(np.float32)
+        densities = density.reshape(-1).cpu().numpy().astype(np.float32)
+        if sh_dim > 0:
+            sh_coeffs = sh.reshape(-1, sh_dim, 3).cpu().numpy().astype(np.float32)
+        else:
+            sh_coeffs = np.empty((N, 0, 3), dtype=np.float32)
+
+        tetra_dict = {}
+        tetra_dict["indices"] = self.indices.cpu().numpy().astype(np.int32)
+        # tetra_dict["mask"] = self.mask.cpu().numpy().astype(np.uint8)
+        tetra_dict["s"] = np.ascontiguousarray(densities)
+        for i, co in enumerate(["x", "y", "z"]):
+            tetra_dict[f"grd_{co}"]         = np.ascontiguousarray(grds[:, i])
+
+        sh_0 = RGB2SH(base_color_v0_raw)
+        tetra_dict[f"sh_0_r"] = np.ascontiguousarray(sh_0[:, 0])
+        tetra_dict[f"sh_0_g"] = np.ascontiguousarray(sh_0[:, 1])
+        tetra_dict[f"sh_0_b"] = np.ascontiguousarray(sh_0[:, 2])
+        for i in range(sh_coeffs.shape[1]):
+            tetra_dict[f"sh_{i+1}_r"] = np.ascontiguousarray(sh_coeffs[:, i, 0])
+            tetra_dict[f"sh_{i+1}_g"] = np.ascontiguousarray(sh_coeffs[:, i, 1])
+            tetra_dict[f"sh_{i+1}_b"] = np.ascontiguousarray(sh_coeffs[:, i, 2])
+
+
+        data_dict = {
+            "vertex": vertex_dict,
+            "tetrahedron": tetra_dict,
+        }
+
+        tinyplypy.write_ply(str(path), data_dict, is_binary=True)
 
 # ===========================================================================
 # SimpleOptimizer
@@ -981,9 +1064,3 @@ class SimpleOptimizer:
     @torch.no_grad()
     def split(self, split_point, **kwargs):
         self.add_points(split_point)
-
-    def clip_grad_norm_(self, max_norm):
-        torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
-        torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)
-        torch.nn.utils.clip_grad_norm_(self.model.gradient, max_norm)
-        torch.nn.utils.clip_grad_norm_(self.model.sh, max_norm)

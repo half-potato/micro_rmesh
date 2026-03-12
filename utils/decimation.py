@@ -10,8 +10,6 @@ Low-score edges (short, in uniform RGB regions) are collapsed first.
 import torch
 import torch.nn as nn
 import time
-from utils.topo_utils import calculate_circumcenters_torch
-from utils.contraction import contract_mean_std
 
 
 def build_edge_list(indices):

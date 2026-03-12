@@ -10,13 +10,15 @@ from fused_ssim import fused_ssim
 from utils.train_util import render
 import matplotlib.pyplot as plt
 
+TIME_BUDGET = 600
+
 torch.set_printoptions(precision=10)
 
 def psnr(img1, img2):
     mse = (((img1 - img2)) ** 2).reshape(img1.shape[0], -1).mean(1, keepdim=True)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
-def evaluate_and_save(model, splits, output_path, tile_size, min_t, save=True):
+def evaluate(model, splits, output_path, tile_size, min_t, save=True):
     gt_path = os.path.join(output_path, "images", "gt")
     pred_path = os.path.join(output_path, "images", "pred")
     if save:

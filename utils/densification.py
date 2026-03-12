@@ -1,47 +1,10 @@
 import gc
 import cv2
-from numpy.random import random
 import torch
-import imageio
 from utils import safe_math
 from typing import NamedTuple, List
-from delaunay_rasterization.render_err import render_err
+from rmesh_renderer.render_err import render_err
 from icecream import ic
-from utils.topo_utils import tet_volumes
-import termplotlib as tpl
-import numpy as np
-from utils.train_util import render_debug
-import torchvision.transforms as T
-
-@torch.no_grad()
-def determine_cull_mask(
-    sampled_cameras: List["Camera"],
-    model,
-    # glo_list,
-    args,
-    device: torch.device,
-):
-    """Accumulate densification statistics for one iteration."""
-    n_tets = model.indices.shape[0]
-    peak_contrib = torch.zeros((n_tets), device=device)
-
-    for cam in sampled_cameras:
-        target = cam.original_image.cuda()
-
-        image_votes, extras = render_err(
-            target, cam, model,
-            scene_scaling=model.scene_scaling,
-            tile_size=args.tile_size,
-            # glo=glo_list(torch.LongTensor([cam.uid]).to(device))
-        )
-
-        tc = extras["tet_count"][..., 0]
-        max_T = extras["tet_count"][..., 1].float() / 65535
-        # peak_contrib = torch.maximum(image_T / tc.clip(min=1), peak_contrib)
-        peak_contrib = torch.maximum(max_T, peak_contrib)
-
-    mask = ((peak_contrib > args.contrib_threshold))
-    return mask
 
 def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
     """
@@ -92,19 +55,6 @@ def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
 
     denom = a * c - b * b
     
-    # Parameters for closest points on the *infinite lines*
-    # s_line = (b*e - c*d) / denom
-    # t_line = (a*e - b*d) / denom (this t_line corresponds to -t in some formulations, careful with sign)
-    # The t_line should be for the parameterization o2 + t*d2.
-    # If P1 = o1 + s*d1 and P2 = o2 + t*d2, and we minimize ||P1-P2||^2,
-    # by setting derivatives w.r.t s and t to 0, we get:
-    # s * (d1.d1) - t * (d1.d2) = -d1.(o1-o2) = d1.v_o = d
-    # s * (d1.d2) - t * (d2.d2) = -d2.(o1-o2) = d2.v_o = e
-    # Solving this system:
-    # s_line = (d*c - e*b) / denom
-    # t_line = (d*b - e*a) / denom -> this results in parameter for -d2 if system set up for P1-P2
-    # Or, more directly for t_line for P2 = o2 + t*d2: t_line = (b*d - a*e) / denom
-    
     s_line_num = (b * e) - (c * d)
     t_line_num = (a * e) - (b * d) # This corresponds to t_c = (a*e - b*d)/denom from previous thoughts for P(t) = O2 + tD2
 
@@ -145,7 +95,6 @@ def collect_render_stats(
     args,
     device: torch.device,
 ):
-    """Accumulate densification statistics for one iteration."""
     n_tets = model.indices.shape[0]
 
     # Pre-allocate accumulators ------------------------------------------------
@@ -249,7 +198,6 @@ def apply_densification(
     model,
     tet_optim,
     args,
-    iteration: int,
     device: torch.device,
     target_addition
 ):

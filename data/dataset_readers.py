@@ -13,6 +13,7 @@ from plyfile import PlyData, PlyElement
 import json
 from data.types import BasicPointCloud, ProjectionType, CameraInfo, SceneInfo
 from icecream import ic
+import math
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))

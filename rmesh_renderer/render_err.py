@@ -1,12 +1,12 @@
 import torch
-from delaunay_rasterization.render_grid import RenderGrid
-from delaunay_rasterization.tile_shader_slang import vertex_and_tile_shader
+from rmesh_renderer.render_grid import RenderGrid
+from rmesh_renderer.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
 from data.camera import Camera
 from utils.ssim import ssim
 import torch.nn.functional as F
-from delaunay_rasterization.slang.slang_modules import shader_manager
+from rmesh_renderer.slang.slang_modules import shader_manager
 
 # --- quick, fully-differentiable blur ---------------------------------------
 def gaussian_blur(img: torch.Tensor,

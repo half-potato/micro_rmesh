@@ -2,8 +2,6 @@ import cv2
 import os
 from pathlib import Path
 import sys
-sys.path.append(str(Path(os.path.abspath('')).parent))
-print(str(Path(os.path.abspath('')).parent))
 import math
 import torch
 from data import loader
@@ -12,19 +10,20 @@ import time
 from tqdm import tqdm
 import numpy as np
 from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
-from models.simple import SimpleModel as Model, SimpleOptimizer as TetOptimizer
+from model import SimpleModel as Model, SimpleOptimizer as TetOptimizer
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
 import json
 import imageio
-from utils import test_util
+import test_util
 import termplotlib as tpl
 import gc
 from utils.densification import collect_render_stats, apply_densification
 from utils.decimation import apply_decimation
 import mediapy
 from icecream import ic
+
 
 torch.set_num_threads(1)
 
@@ -146,8 +145,9 @@ for i, camera in enumerate(train_cameras):
     camera_inds_back[i] = camera.uid
 
 images = []
-psnrs = [[]]
-inds = []
+psnrs = []
+inds = list(range(len(train_cameras)))
+random.shuffle(inds)
 
 num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
@@ -158,26 +158,34 @@ dschedule_decimate = list(range(args.decimate_start, args.decimate_end, args.dec
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, device)
 
-progress_bar = tqdm(range(args.iterations))
 torch.cuda.empty_cache()
-for iteration in progress_bar:
-    do_delaunay = iteration % args.delaunay_interval == 0
-    do_cloning = iteration in dschedule
-    do_sh_up = not args.sh_interval == 0 and iteration % args.sh_interval == 0 and iteration > 0
-    do_sh_step = iteration % args.sh_step == 0
-    do_decimation = iteration in dschedule_decimate
+
+t_start_training = time.time()
+smooth_train_loss = 0
+total_training_time = 0
+step = 0
+
+while True:
+    torch.cuda.synchronize()
+    t0 = time.time()
+    do_delaunay = step % args.delaunay_interval == 0
+    do_cloning = step in dschedule
+    do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
+    do_sh_step = step % args.sh_step == 0
+    do_decimation = step in dschedule_decimate
 
     if do_delaunay:
         st = time.time()
         tet_optim.update_triangulation(
-            density_threshold=args.density_threshold if iteration > args.threshold_start else 0,
-            alpha_threshold=args.alpha_threshold if iteration > args.threshold_start else 0,
+            density_threshold=args.density_threshold if step > args.threshold_start else 0,
+            alpha_threshold=args.alpha_threshold if step > args.threshold_start else 0,
             high_precision=False)
 
     if len(inds) == 0:
+        print(f"PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
         inds = list(range(len(train_cameras)))
         random.shuffle(inds)
-        psnrs.append([])
+        psnrs = []
     ind = inds.pop()
     camera = train_cameras[ind]
     target = camera.original_image.cuda()
@@ -238,7 +246,7 @@ for iteration in progress_bar:
                 noise = torch.randn_like(model.interior_vertices) * args.noise_lr * vlr
                 model.interior_vertices.data.add_(noise)
 
-    tet_optim.update_learning_rate(iteration)
+    tet_optim.update_learning_rate(step)
 
     if do_sh_up:
         model.sh_up()
@@ -264,7 +272,6 @@ for iteration in progress_bar:
                 model       = model,
                 tet_optim   = tet_optim,
                 args        = args,
-                iteration   = iteration,
                 device      = device,
                 target_addition= target_addition
             )
@@ -278,19 +285,30 @@ for iteration in progress_bar:
             gc.collect()
             torch.cuda.empty_cache()
 
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = t1 - t0
+
+    if step > 10:
+        total_training_time += dt
+
     psnr = -20 * math.log10(math.sqrt(l2_loss.detach().cpu().clip(min=1e-6).item()))
-    psnrs[-1].append(psnr)
+    psnrs.append(psnr)
 
-    disp_ind = max(len(psnrs)-2, 0)
-    avg_psnr = sum(psnrs[disp_ind]) / max(len(psnrs[disp_ind]), 1)
-    progress_bar.set_postfix({
-        "PSNR": repr(f"{psnr:>5.2f}"),
-        "Mean": repr(f"{avg_psnr:>5.2f}"),
-        "#V": len(model),
-        "#T": model.indices.shape[0],
-    })
+    if step == 0:
+        gc.collect()
+        gc.freeze()
+        gc.disable()
+    elif (step + 1) % 5000 == 0:
+        gc.collect()
+        
 
-avged_psnrs = [sum(v)/len(v) for v in psnrs if len(v) == len(train_cameras)]
+    if step > 10 and total_training_time >= test_util.TIME_BUDGET:
+        break
+
+    step += 1
+
+print()
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
@@ -299,14 +317,14 @@ if args.render_train:
     splits = zip(['train', 'test'], [train_cameras, test_cameras])
 else:
     splits = zip(['test'], [test_cameras])
-results = test_util.evaluate_and_save(model, splits, args.output_path, args.tile_size, min_t, save=False)
+results = test_util.evaluate(model, splits, args.output_path, args.tile_size, min_t, save=False)
 
-with (args.output_path / "results.json").open("w") as f:
-    all_data = dict(
-        psnr = avged_psnrs[-1] if len(avged_psnrs) > 0 else 0,
-        n_vertices = model.vertices.shape[0],
-        n_interior_vertices = model.num_int_verts,
-        n_tets = model.indices.shape[0],
-        **results
-    )
-    json.dump(all_data, f, cls=CustomEncoder)
+all_data = dict(
+    n_vertices = model.vertices.shape[0],
+    n_interior_vertices = model.num_int_verts,
+    n_tets = model.indices.shape[0],
+    **results
+)
+print("----------")
+for k, v in all_data:
+    print(f"{k}: {v}")

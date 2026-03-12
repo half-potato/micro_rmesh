@@ -1,10 +1,10 @@
 import torch
-from delaunay_rasterization.render_grid import RenderGrid
-from delaunay_rasterization.slang.slang_modules import shader_manager
-from delaunay_rasterization.tile_shader_slang import vertex_and_tile_shader
+from rmesh_renderer.render_grid import RenderGrid
+from rmesh_renderer.slang.slang_modules import shader_manager
+from rmesh_renderer.tile_shader_slang import vertex_and_tile_shader
 from icecream import ic
 import time
-from delaunay_rasterization.util import recombine_tensors, split_tensors
+from rmesh_renderer.util import recombine_tensors, split_tensors
 
 class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod

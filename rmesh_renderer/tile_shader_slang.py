@@ -1,9 +1,9 @@
 import torch
-from delaunay_rasterization.internal.slang.slang_modules import shader_manager
+from rmesh_renderer.slang.slang_modules import shader_manager
 import math
-from delaunay_rasterization.internal.sort_by_keys import sort_by_keys_cub
+from rmesh_renderer.sort_by_keys import sort_by_keys_cub
 from icecream import ic
-from delaunay_rasterization.internal.util import recombine_tensors, split_tensors
+from rmesh_renderer.util import recombine_tensors, split_tensors
 
 def augment(v):
     return torch.cat([v, torch.ones_like(v[:, :1])], dim=-1)
