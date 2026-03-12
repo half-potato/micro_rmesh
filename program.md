@@ -10,7 +10,7 @@ This is an implementation of neural radiance fields represented by a delaunay tr
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `floater_/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `floater/mar5`). The branch `floater/<tag>` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b floater_/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
@@ -116,7 +116,7 @@ LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py, model.py` with an experimental idea by directly hacking the code.
-3. git commit
+3. git add -A, git commit
 4. Run the experiment: `CUDA_VISIBLE_DEVICES=3 uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^test_PSNR:\|^test_ENTROPY:\|^n_vertices:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
