@@ -1,0 +1,9 @@
+[submodule "gDel3D"]
+	path = gDel3D
+	url = git@github.com:half-potato/pyGDel3D.git
+[submodule "submodules/fused-ssim"]
+	path = submodules/fused-ssim
+	url = https://github.com/rahul-goel/fused-ssim
+[submodule "rmeshvk"]
+	path = rmeshvk
+	url = git@github.com:half-potato/rmeshvk.git

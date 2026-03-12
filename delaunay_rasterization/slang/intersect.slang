@@ -1,0 +1,845 @@
+import safe_math;
+#define epsilon 1e-6
+#define FLT_MAX 1e20
+#define FLT_MIN -1e20
+
+// Helper function to compute the determinant of a 3x3 matrix
+[Differentiable]
+float det_3x3(float3 a, float3 b, float3 c) {
+    return dot(a, cross(b, c));
+}
+
+// bool same_side(float3 v1, float3 v2, float3 v3, float3 v4, float3 p) {
+//     float3 normal = cross(v2 - v1, v3 - v1);
+//     float dot_v4 = dot(normal, v4 - v1);
+//     float dot_p = dot(normal, p - v1);
+//     return sign(dot_v4) * sign(dot_p) > 0;
+// }
+
+// bool point_in_tetrahedron(Tetrahedra tet, float3 point) {
+//     return (same_side(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point) &&
+//             same_side(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point) &&
+//             same_side(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point) && 
+//             same_side(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point));
+// };
+
+inline int sign_with_eps(float x, float eps) {
+    if      (x >  eps) return  1;
+    else if (x < -eps) return -1;
+    else               return  0;
+}
+
+bool same_side_eps(
+    const float3 v1,
+    const float3 v2,
+    const float3 v3,
+    const float3 v4,
+    const float3 p,
+    float eps
+) {
+    float3 normal = cross(v2 - v1, v3 - v1); 
+    float   dpV4  = dot(normal, v4 - v1);
+    float   dpP   = dot(normal, p  - v1);
+
+    // Compare the "sign" of dpV4 and dpP with a tolerance:
+    int sV4 = sign_with_eps(dpV4, eps);
+    int sP  = sign_with_eps(dpP,  eps);
+
+    // same_side means they are either the same nonzero sign or at least one is effectively zero
+    // So we check sV4*sP >= 0 (which includes both > 0 and == 0):
+    return (sV4 * sP) >= 0;
+}
+
+bool point_in_tetrahedron(const Tetrahedra tet, const float3 point, float eps=1e-10f)
+{
+    // Check if the point is extremely close to any vertex
+
+    for (int i = 0; i < 4; ++i) {
+        if (length(point - tet.verts[i]) < 1e-6) {
+            return true;  // Treat it as inside
+        }
+    }
+
+    // Same-side tests with relaxed epsilon
+    return ( same_side_eps(tet.verts[0], tet.verts[1], tet.verts[2], tet.verts[3], point, eps) &&
+             same_side_eps(tet.verts[1], tet.verts[2], tet.verts[3], tet.verts[0], point, eps) &&
+             same_side_eps(tet.verts[2], tet.verts[3], tet.verts[0], tet.verts[1], point, eps) &&
+             same_side_eps(tet.verts[3], tet.verts[0], tet.verts[1], tet.verts[2], point, eps) );
+}
+
+
+struct Tetrahedra : IDifferentiable
+{
+    float3[4] verts;
+};
+
+bool is_planar(Tetrahedra tetra)
+{
+    float3 v0 = tetra.verts[0];
+    float3 v1 = tetra.verts[1];
+    float3 v2 = tetra.verts[2];
+    float3 v3 = tetra.verts[3];
+    float3 edge1 = v1 - v0;
+    float3 edge2 = v2 - v0;
+    float3 normal = normalize(cross(edge1, edge2));
+
+    float distance = dot(normal, (v3 - v0));
+
+    return abs(distance) < 1e-3;
+}
+
+int max_dim(float3 v) {
+    if (v.x > v.y && v.x > v.z) return 0;
+    if (v.y > v.z) return 1;
+    return 2;
+}
+
+void swap(inout int a, inout int b) {
+    int temp = a;
+    a = b;
+    b = temp;
+}
+
+[Differentiable]
+bool ray_triangle_intersect(
+    in float3 ray_origin,
+    in float3 ray_dir,
+    float3 v0,
+    float3 v1,
+    float3 v2,
+    out float t,
+    out float U,
+    out float V)
+{
+    t = -1;
+    /* Calculate dimension where the ray direction is maximal */
+    int kz = max_dim(abs(ray_dir));
+    int kx = kz + 1; 
+    if (kx == 3) kx = 0;
+    int ky = kx + 1; 
+    if (ky == 3) ky = 0;
+
+    /* Swap kx and ky dimensions to preserve winding direction of triangles */
+    if (ray_dir[kz] < 0.0f) swap(kx, ky);
+
+    /* Calculate shear constants */
+    float Sx = ray_dir[kx] / ray_dir[kz];
+    float Sy = ray_dir[ky] / ray_dir[kz];
+    float Sz = 1.0f / ray_dir[kz];
+
+    /* Calculate vertices relative to ray origin */
+    float3 A = v0 - ray_origin;
+    float3 B = v1 - ray_origin;
+    float3 C = v2 - ray_origin;
+
+    /* Perform shear and scale of vertices */
+    float Ax = A[kx] - Sx * A[kz];
+    float Ay = A[ky] - Sy * A[kz];
+    float Bx = B[kx] - Sx * B[kz];
+    float By = B[ky] - Sy * B[kz];
+    float Cx = C[kx] - Sx * C[kz];
+    float Cy = C[ky] - Sy * C[kz];
+
+    /* Calculate scaled barycentric coordinates */
+    U = Cx * By - Cy * Bx;
+    V = Ax * Cy - Ay * Cx;
+    float W = Bx * Ay - By * Ax;
+
+    /* Fallback to test against edges using double precision */
+    if (U == 0.0f || V == 0.0f || W == 0.0f) {
+        double CxBy = (double)Cx * (double)By;
+        double CyBx = (double)Cy * (double)Bx;
+        U = (float)(CxBy - CyBx);
+        
+        double AxCy = (double)Ax * (double)Cy;
+        double AyCx = (double)Ay * (double)Cx;
+        V = (float)(AxCy - AyCx);
+        
+        double BxAy = (double)Bx * (double)Ay;
+        double ByAx = (double)By * (double)Ax;
+        W = (float)(BxAy - ByAx);
+    }
+
+    /* Perform edge tests */
+    #ifdef BACKFACE_CULLING
+    if (U < 0.0f || V < 0.0f || W < 0.0f) return false;
+    #else
+    if ((U < 0.0f || V < 0.0f || W < 0.0f) && (U > 0.0f || V > 0.0f || W > 0.0f)) return false;
+    #endif
+
+    /* Calculate determinant */
+    float det = U + V + W;
+    if (det == 0.0f) return false;
+
+    /* Calculate scaled z-coordinates of vertices and use them to calculate the hit distance */
+    float Az = Sz * A[kz];
+    float Bz = Sz * B[kz];
+    float Cz = Sz * C[kz];
+    float T = U * Az + V * Bz + W * Cz;
+
+    #ifdef BACKFACE_CULLING
+    if (T < 0.0f) return false;
+    #else
+    int det_sign = sign(det);
+    if (asfloat(asuint(T) ^ asuint(det_sign)) < 0.0f) return false;
+    #endif
+
+    /* Normalize T */
+    t = T / det;
+    return true;
+}
+
+[Differentiable]
+bool ray_triangle_intersect2(in float3 ray_origin, 
+                             in float3 ray_vector, 
+                             in float3 tri_a,
+                             in float3 tri_b,
+                             in float3 tri_c,
+                             out float t)
+{
+    t = -1;
+    float3 edge1 = tri_b - tri_a;
+    float3 edge2 = tri_c - tri_a;
+    float3 ray_cross_e2 = cross(ray_vector, edge2);
+    float det = dot(edge1, ray_cross_e2);
+    float inv_det = safe_div(1.0, det);
+    float3 s = ray_origin - tri_a;
+    float u = inv_det * dot(s, ray_cross_e2);
+
+    if (u < 0 || u > 1)
+        return false;
+
+    float3 s_cross_e1 = cross(s, edge1);
+    float v = inv_det * dot(ray_vector, s_cross_e1);
+
+    if (v < 0 || u + v > 1)
+        return false;
+
+    // At this stage we can compute t to find out where the intersection point is on the line.
+    t = inv_det * dot(edge2, s_cross_e1);
+
+    return true;
+}
+
+// Ray-tetrahedron intersection function
+[Differentiable]
+bool ray_tetrahedron_intersect(
+    in float3 orig, in float3 dir, in Tetrahedra g,
+    out float2 dist, out float3 norm)
+{
+    float3 v0 = g.verts[0];
+    float3 v1 = g.verts[1];
+    float3 v2 = g.verts[2];
+    float3 v3 = g.verts[3];
+
+    bool hit = false;
+    float t_enter = FLT_MAX;
+    float t_exit = -FLT_MAX;
+
+    // Check intersection with each face of the tetrahedron
+    float t, u, v;
+    if (ray_triangle_intersect(orig, dir, v0, v1, v2, t, u, v)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+    if (ray_triangle_intersect(orig, dir, v0, v1, v3, t, u, v)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+    if (ray_triangle_intersect(orig, dir, v0, v2, v3, t, u, v)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+
+    if (ray_triangle_intersect(orig, dir, v1, v2, v3, t, u, v)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+
+    if (point_in_tetrahedron(g, orig)) {
+        t_enter = 0;
+    }
+
+    dist = {t_enter, t_exit};
+    return hit;
+}
+
+[Differentiable]
+bool ray_triangle_intersect_2D(
+    float2 pixelPos,                 // The 2D pixel coordinate (screen space)
+    float2 t0, float2 t1, float2 t2, // 2D positions of the triangle vertices
+    float w0, float w1, float w2,     // 1/distance at each vertex (reciprocal of camera distance)
+    out float distance
+)
+{
+    // Edges relative to t0
+    float2 e0 = t1 - t0;
+    float2 e1 = t2 - t0;
+    float2 v = pixelPos - t0;
+
+    // Compute dot products
+    float dot00 = dot(e0, e0);
+    float dot01 = dot(e0, e1);
+    float dot02 = dot(e0, v);
+    float dot11 = dot(e1, e1);
+    float dot12 = dot(e1, v);
+
+    // Compute barycentric denominator
+    float denom = dot00 * dot11 - dot01 * dot01;
+
+    // Compute barycentric coordinates (alpha, beta, gamma)
+    float alpha = (dot11 * dot02 - dot01 * dot12) / denom;
+    float beta = (dot00 * dot12 - dot01 * dot02) / denom;
+    float gamma = 1.0 - alpha - beta;
+
+    // Check if we are inside the triangle
+    if (alpha < 0.0f || beta < 0.0f || gamma < 0.0f)
+    {
+        // Return negative to indicate "outside"
+        return false;
+    }
+
+    // Interpolate 1/distance
+    float reciprocalDist = alpha * w1 + beta * w2 + gamma * w0;
+
+    // Avoid division by zero
+    if (reciprocalDist <= 0.0f)
+    {
+        return false;
+    }
+
+    // Final perspective-correct distance
+    distance = 1.0f / reciprocalDist;
+    return true;
+}
+
+[Differentiable]
+float2 ray_tetrahedron_intersect_2D(float2 pixelPos, float tmin, Tetrahedra g) {
+    float2 v0 = { g.verts[0].x, g.verts[0].y };
+    float2 v1 = { g.verts[1].x, g.verts[1].y };
+    float2 v2 = { g.verts[2].x, g.verts[2].y };
+    float2 v3 = { g.verts[3].x, g.verts[3].y };
+    float w0 = g.verts[0].z;
+    float w1 = g.verts[1].z;
+    float w2 = g.verts[2].z;
+    float w3 = g.verts[3].z;
+
+    bool hit = false;
+    float t_enter = FLT_MAX;
+    float t_exit = -FLT_MAX;
+
+    // Check intersection with each face of the tetrahedron
+    float t;
+    if (ray_triangle_intersect_2D(pixelPos, v0, v1, v2, w0, w1, w2, t)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+    if (ray_triangle_intersect_2D(pixelPos, v0, v1, v3, w0, w1, w3, t)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+    if (ray_triangle_intersect_2D(pixelPos, v0, v2, v3, w0, w2, w3, t)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+
+    if (ray_triangle_intersect_2D(pixelPos, v1, v2, v3, w1, w2, w3, t)) {
+        hit = true;
+        t_enter = min(t_enter, t);
+        t_exit = max(t_exit, t);
+    }
+
+    if (hit) {
+        return {max(t_exit - max(t_enter, tmin), 0), (t_enter+t_exit)/2};
+    } else {
+        return {-1, 0};
+    }
+}
+
+static const uint4 kTetTriangles[4] = {
+    /* 
+    *    y
+    *    ^
+    *    |
+    *    *v2    z
+    *    |     /
+    *    |    *v3
+    *    |   /
+    *    |  /
+    *    | /          v1
+    *    v0------------*--->x
+    *                 
+    */
+    uint4(0, 2, 1, 3),
+    uint4(1, 2, 3, 0),
+    uint4(0, 3, 2, 1),
+    uint4(3, 0, 1, 2),
+};
+
+// static const uint4 kTetTriangles[4] = {
+//     uint4(1, 2, 3, 0), // Face opposite v0
+//     uint4(0, 3, 2, 1), // Face opposite v1 (Wound CCW)
+//     uint4(0, 1, 3, 2), // Face opposite v2 (Wound CCW)
+//     uint4(0, 2, 1, 3)  // Face opposite v3 (Wound CCW)
+// };
+
+[Differentiable]
+bool ray_tetrahedron_intersect_fused(
+    float3 orig, float3 dir,
+    float4x3 verts,
+    inout float2 t,
+    out float3 enter_norm,
+    out float3 exit_norm)
+{
+    // --------------------------------------------------------------------
+    // 1. Compute plane equations for the 4 faces (outward normals)
+    //    n[i].x, n[i].y, n[i].z, and d[i]
+    // --------------------------------------------------------------------
+    static const uint3 kTetTriangles[4] = {
+        /* 
+        *    y
+        *    ^
+        *    |
+        *    *v2    z
+        *    |     /
+        *    |    *v3
+        *    |   /
+        *    |  /
+        *    | /          v1
+        *    v0------------*--->x
+        *                 
+        */
+        uint3(0, 2, 1),
+        uint3(1, 2, 3),
+        uint3(0, 3, 2),
+        uint3(3, 0, 1),
+    };
+
+
+
+    float3 v0 = verts[0];
+    float3 v1 = verts[1];
+    float3 v2 = verts[2];
+    float3 v3 = verts[3];    
+    // const float3 n0 = cross(
+    //     verts[kTetTriangles[0][2]] - verts[kTetTriangles[0][0]],
+    //     verts[kTetTriangles[0][1]] - verts[kTetTriangles[0][0]]);
+    // const float d0  = -dot(n0, verts[kTetTriangles[0][0]] - orig);
+    // const float3 n1 = cross(
+    //     verts[kTetTriangles[1][2]] - verts[kTetTriangles[1][0]],
+    //     verts[kTetTriangles[1][1]] - verts[kTetTriangles[1][0]]);
+    // const float d1  = -dot(n1, verts[kTetTriangles[1][0]] - orig);
+    // const float3 n2 = cross(
+    //     verts[kTetTriangles[2][2]] - verts[kTetTriangles[2][0]],
+    //     verts[kTetTriangles[2][1]] - verts[kTetTriangles[2][0]]);
+    // const float d2  = -dot(n2, verts[kTetTriangles[2][0]] - orig);
+    // const float3 n3 = cross(
+    //     verts[kTetTriangles[3][2]] - verts[kTetTriangles[3][0]],
+    //     verts[kTetTriangles[3][1]] - verts[kTetTriangles[3][0]]);
+    // const float d3  = -dot(n3, verts[kTetTriangles[3][0]] - orig);
+
+
+    // Face 0: (v0, v1, v2)
+    float3 n0 = cross(v1 - v0, v2 - v0);
+    if (dot(n0, v3 - v0) > 0) {
+        n0 = -n0;
+    }
+    float d0 = -dot(n0, v0-orig);
+
+    // Face 1: (v0, v1, v3)
+    float3 n1 = cross(v1 - v0, v3 - v0);
+    if (dot(n1, v2 - v0) > 0) {
+        n1 = -n1;
+    }
+    float d1 = -dot(n1, v0-orig);
+
+    // Face 2: (v0, v2, v3)
+    float3 n2 = cross(v2 - v0, v3 - v0);
+    if (dot(n2, v1 - v0) > 0) {
+        n2 = -n2;
+    }
+    float d2 = -dot(n2, v0-orig);
+
+    // Face 3: (v1, v2, v3)
+    float3 n3 = cross(v2 - v1, v3 - v1);
+    if (dot(n3, v0 - v1) > 0) {
+        n3 = -n3;
+    }
+    float d3 = -dot(n3, v1-orig);
+
+    // --------------------------------------------------------------------
+    // 2. Initialize the intersection range [t_enter, t_exit]
+    //    You might prefer (-∞, +∞), but this variant starts at [0, big].
+    // --------------------------------------------------------------------
+    float t_enter = -1e30f;
+    float t_exit  = 1e30f;
+    float eps     = 1e-10f;
+    enter_norm = {0.f, 0.f, 0.f};
+    exit_norm = {0.f, 0.f, 0.f};
+
+    // --------------------------------------------------------------------
+    // 3. Clip against Plane 0
+    // --------------------------------------------------------------------
+    {
+        float dist0  = d0;
+        float denom0 = dot(n0, dir);
+
+        if (fabs(denom0) < eps) {
+            // Ray is almost parallel to plane
+            if (dist0 > 0.0f) {
+                // Entire ray is outside
+                return false;
+            }
+        }
+        else {
+            float tplane = -dist0 / denom0;
+            if (denom0 < 0.0f) {
+                // Ray entering at this t
+                if (tplane > t_enter) {
+                    t_enter = tplane;
+                    enter_norm = n0;
+                }
+            }
+            else {
+                // Ray exiting
+                if (tplane < t_exit) {
+                    t_exit = tplane;
+                    exit_norm = n0;
+                }
+            }
+        }
+
+    }
+
+    // --------------------------------------------------------------------
+    // 4. Clip against Plane 1
+    // --------------------------------------------------------------------
+    {
+        float dist1  = d1;
+        float denom1 = dot(n1, dir);
+
+        if (fabs(denom1) < eps) {
+            if (dist1 > 0.0f) {
+                return false;
+            }
+        }
+        else {
+            float tplane = -dist1 / denom1;
+            if (denom1 < 0.0f) {
+                if (tplane > t_enter) {
+                    t_enter = tplane;
+                    enter_norm = n1;
+                }
+            }
+            else {
+                if (tplane < t_exit) {
+                    t_exit = tplane;
+                    exit_norm = n1;
+                }
+            }
+        }
+
+    }
+
+    // --------------------------------------------------------------------
+    // 5. Clip against Plane 2
+    // --------------------------------------------------------------------
+    {
+        float dist2  = d2;
+        float denom2 = dot(n2, dir);
+
+        if (fabs(denom2) < eps) {
+            if (dist2 > 0.0f) {
+                return false;
+            }
+        }
+        else {
+            float tplane = -dist2 / denom2;
+            if (denom2 < 0.0f) {
+                if (tplane > t_enter) {
+                    t_enter = tplane;
+                    enter_norm = n2;
+                }
+            }
+            else {
+                if (tplane < t_exit) {
+                    t_exit = tplane;
+                    exit_norm = n2;
+                }
+            }
+        }
+
+    }
+
+    // --------------------------------------------------------------------
+    // 6. Clip against Plane 3
+    // --------------------------------------------------------------------
+    {
+        float dist3  = d3;
+        float denom3 = dot(n3, dir);
+
+        if (fabs(denom3) < eps) {
+            if (dist3 > 0.0f) {
+                return false;
+            }
+        }
+        else {
+            float tplane = -dist3 / denom3;
+            if (denom3 < 0.0f) {
+                if (tplane > t_enter) {
+                    t_enter = tplane;
+                    enter_norm = n3;
+                }
+            }
+            else {
+                if (tplane < t_exit) {
+                    t_exit = tplane;
+                    exit_norm = n3;
+                }
+            }
+        }
+
+        if (t_enter > t_exit) {
+            return false;
+        }
+    }
+
+    // --------------------------------------------------------------------
+    // 7. Final intersection range
+    //    Return the clipped segment length if it's in front of the origin
+    // --------------------------------------------------------------------
+    if (t_exit <= 0.0f) {
+        return false;
+    }
+    t_enter = max(t_enter, 0.f);
+    t = { t_enter, t_exit };
+    return true;
+}
+
+[Differentiable]
+bool ray_tetrahedron_intersect_exit(
+    float3 orig, float3 dir,
+    float4x3 verts,
+    in float t_enter,
+    inout float t,
+    out float3 exit_norm,
+    in int in_face,
+    out int out_face)
+{
+
+    float t_exit  = 1e30f;
+    float t_exit_d  = 1;
+    float eps     = 1e-10f;
+    exit_norm = {0.f, 0.f, 0.f};
+    out_face = (in_face + 2)%4;
+
+    [unroll]
+    for (int i=0; i<4; i++) {
+        if (i == in_face) continue;
+        float3 n0 = -cross(
+            verts[kTetTriangles[i][2]] - verts[kTetTriangles[i][0]],
+            verts[kTetTriangles[i][1]] - verts[kTetTriangles[i][0]]);
+        if (dot(n0, verts[kTetTriangles[i][3]] - verts[kTetTriangles[i][0]]) > 0) {
+            n0 = -n0;
+        }
+        const float dist0  = -dot(n0, verts[kTetTriangles[i][0]] - orig);
+        float denom0 = dot(n0, dir);
+
+        if (fabs(denom0) < eps) {
+            // Ray is almost parallel to plane
+        } else {
+            if (denom0 < 0.0f) {
+            } else {
+                // Ray exiting
+                if (-dist0 * t_exit_d < t_exit * denom0 && -dist0 > t_enter * denom0) {
+                    t_exit = -dist0;
+                    t_exit_d = denom0;
+                    exit_norm = n0;
+                    out_face = i;
+                }
+            }
+        }
+
+    }
+    t = { t_exit / t_exit_d };
+    return true;
+}
+
+
+struct PluckerLine: IDifferentiable {
+    float3 u; // Direction
+    float3 v; // Moment (orig x dir)
+
+    [Differentiable]
+    inline static PluckerLine from_ray(float3 orig, float3 dir) {
+        return {dir, cross(orig, dir)};
+    }
+
+    [Differentiable]
+    inline static PluckerLine from_edge(float3 v0, float3 v1) {
+        return {v1 - v0, cross(v0, v1)};
+    }
+
+    [Differentiable]
+    inline float side(PluckerLine other) {
+        return dot(u, other.v) + dot(other.u, v);
+    }
+};
+
+[Differentiable]
+bool ray_tetrahedron_intersect_exit_plucker(
+    float3 orig, float3 dir,
+    float4x3 verts,
+    in float t_enter,
+    inout float t,
+    out float3 exit_norm,
+    in int in_face,
+    out int out_face)
+{
+    t = 1e30f;
+    out_face = -1;
+    bool found_exit = false;
+
+    // Create a Plücker representation of the ray
+    PluckerLine ray_line = PluckerLine::from_ray(orig, dir);
+    
+    // Epsilon to avoid re-intersecting the entry face
+    // This is the "nudge" we discussed, but applied to the *check*
+    const float t_epsilon = 0;
+    float min_valid_t = t_enter + t_epsilon;
+
+    [unroll]
+    for (int i = 0; i < 4; i++) {
+        if (i == in_face) continue;
+        // Get the 3 vertices of the face
+        // Winding order must be consistent for the Plücker test
+        float3 v0 = verts[kTetTriangles[i][0]];
+        float3 v1 = verts[kTetTriangles[i][1]];
+        float3 v2 = verts[kTetTriangles[i][2]];
+
+        // 1. Get Plücker coordinates for the three *edges*
+        // The winding must be consistent, e.g., v0->v1, v1->v2, v2->v0
+        PluckerLine edge01 = PluckerLine::from_edge(v0, v1);
+        PluckerLine edge12 = PluckerLine::from_edge(v1, v2);
+        PluckerLine edge20 = PluckerLine::from_edge(v2, v0);
+
+        // 2. Perform the "side" test
+        float side0 = ray_line.side(edge01);
+        float side1 = ray_line.side(edge12);
+        float side2 = ray_line.side(edge20);
+
+        // 3. Check for triangle intersection
+        // The ray hits the triangle if all three side tests have the same sign.
+        // We use an epsilon for robustly handling near-zero (parallel) cases.
+        const float sign_eps = 1e-10f;
+        bool same_sign = (side0 > -sign_eps && side1 > -sign_eps && side2 > -sign_eps) ||
+                         (side0 < sign_eps && side1 < sign_eps && side2 < sign_eps);
+        // bool same_sign = (side0 > -sign_eps && side1 > -sign_eps && side2 > -sign_eps);
+
+            float3 n0 = -cross(v2 - v0, v1 - v0);
+            const float dist0 = -dot(n0, verts[kTetTriangles[i][0]] - orig);
+            float denom0 = dot(n0, dir);
+        // printf("%i: (%f, %f, %f). %f\n", i, side0, side1, side2, -dist0/ denom0);
+        float distance = -safe_div(dist0, denom0);
+        // if (same_sign && t_exit > distance) {
+        if (denom0 > 0 && same_sign) {
+            t = distance;
+            exit_norm = n0;
+            out_face = i;
+            found_exit = true;
+        }
+    } // end for loop
+
+    if (!found_exit) {
+        t = t_enter;
+        return false;
+    }
+
+    return true;
+}
+
+[Differentiable]
+bool ray_tetrahedron_intersect_plucker(
+    float3 orig, float3 dir,
+    float4x3 verts,
+    inout float2 t,
+    out float3 enter_norm,
+    out float3 exit_norm)
+{
+    float t_enter = -1e30;
+    float t_exit = 1e30f;
+    bool found_exit = false;
+    bool found_enter = false;
+
+    // Create a Plücker representation of the ray
+    PluckerLine ray_line = PluckerLine::from_ray(orig, dir);
+    
+    // Epsilon to avoid re-intersecting the entry face
+    // This is the "nudge" we discussed, but applied to the *check*
+    const float t_epsilon = 0;
+    float min_valid_t = t_enter + t_epsilon;
+
+    [unroll]
+    for (int i = 0; i < 4; i++) {
+        // Get the 3 vertices of the face
+        // Winding order must be consistent for the Plücker test
+        float3 v0 = verts[kTetTriangles[i][0]];
+        float3 v1 = verts[kTetTriangles[i][1]];
+        float3 v2 = verts[kTetTriangles[i][2]];
+
+        // 1. Get Plücker coordinates for the three *edges*
+        // The winding must be consistent, e.g., v0->v1, v1->v2, v2->v0
+        PluckerLine edge01 = PluckerLine::from_edge(v0, v1);
+        PluckerLine edge12 = PluckerLine::from_edge(v1, v2);
+        PluckerLine edge20 = PluckerLine::from_edge(v2, v0);
+
+        // 2. Perform the "side" test
+        float side0 = ray_line.side(edge01);
+        float side1 = ray_line.side(edge12);
+        float side2 = ray_line.side(edge20);
+
+        // 3. Check for triangle intersection
+        // The ray hits the triangle if all three side tests have the same sign.
+        // We use an epsilon for robustly handling near-zero (parallel) cases.
+        const float sign_eps = -1e-8f;
+        // bool same_sign = (side0 > -sign_eps && side1 > -sign_eps && side2 > -sign_eps) ||
+        //                  (side0 < sign_eps && side1 < sign_eps && side2 < sign_eps);
+        bool all_positive = (side0 > sign_eps && side1 > sign_eps && side2 > sign_eps);
+        bool all_negative = (side0 < -sign_eps && side1 < -sign_eps && side2 < -sign_eps);
+
+        float3 n0 = -cross(v2 - v0, v1 - v0);
+        const float dist0  = -dot(n0, verts[kTetTriangles[i][0]] - orig);
+        float denom0 = dot(n0, dir);
+        if (abs(denom0) < 1e-10) {
+            continue;
+        }
+        // printf("%i: (%f, %f, %f). %f\n", i, side0, side1, side2, -dist0/ denom0);
+        float distance = -safe_div(dist0, denom0);
+        if (all_positive) {// && t_exit > distance) {
+            t_exit = distance;
+            exit_norm = -n0;
+            found_exit = true;
+        } else if (all_negative) {// && t_enter < distance) {
+            t_enter = distance;
+            enter_norm = -n0;
+            found_enter = true;
+        }
+    } // end for loop
+
+    t = { max(t_enter, 0.f), t_exit };
+    if (t_enter > t_exit || t_exit <= 0.0f || t_exit > 1e-1 || t_enter < -1e3) {
+        return false;
+    }
+    if (!found_exit || !found_enter) {
+        return false;
+    }
+
+    return true;
+}

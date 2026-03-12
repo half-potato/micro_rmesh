@@ -1,0 +1,48 @@
+[project]
+name = "dsplat"
+version = "0.1.0"
+description = "Delaunay splatting boooii"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gdel3d",
+    "open3d",
+    "icecream>=2.1.5",
+    "imageio[ffmpeg]>=2.37.0",
+    "jax[cuda12]>=0.5.3",
+    "matplotlib>=3.10.3",
+    "mediapy>=1.2.4",
+    "muon-optimizer",
+    "nvdiffrast",
+    "opencv-contrib-python>=4.12.0.88",
+    "plyfile>=1.1.2",
+    "pybind11>=3.0.0",
+    "slangtorch>=1.3.11",
+    "tinyplypy",
+    "torch",
+    "torchaudio",
+    "torchvision",
+    "tqdm>=4.67.1",
+    "fused-ssim",
+    "termplotlib>=0.3.9",
+    "tinycudann",
+    "pyvista>=0.46.5",
+    "tetgen>=0.7.0",
+    "marimo>=0.20.2",
+    "maturin>=1.12.6",
+]
+
+[tool.uv.sources]
+tinyplypy = { git = "https://github.com/half-potato/tinyplypy" }
+muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
+fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim/" }
+gdel3d = { git = "https://github.com/half-potato/pyGDel3D.git" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast" }
+tinycudann = { git = "https://github.com/NVlabs/tiny-cuda-nn/", subdirectory = "bindings/torch" }
+
+[tool.uv]
+no-build-isolation-package = ["fused-ssim", "tinycudann"]
+
+[tool.uv.extra-build-dependencies]
+fused-ssim = ["setuptools"]
+

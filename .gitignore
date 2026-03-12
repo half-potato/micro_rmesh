@@ -1,0 +1,64 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+
+# Development and IDE files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Project-specific cache
+.slangtorch_cache/
+
+# Build artifacts
+dtet/CMake/
+dtet/*.so
+dtet/build/
+
+# Debug files and outputs
+debug/
+debug_output.png
+*.log
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Media files
+*.mp4
+*.jpg
+*.jpeg
+*.gif
+
+# Lock files
+*.lock
+
+# Local development files
+local_settings.py
+*.local
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*~
+output/*
+nv_profiles/*
+*.pkl
+*.ply

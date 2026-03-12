@@ -1,0 +1,2 @@
+global-exclude *~ *.py[cod] *.so *.lock
+include delaunay_rasterization/slang/*.slang
