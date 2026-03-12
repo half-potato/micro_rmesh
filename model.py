@@ -18,7 +18,6 @@ from utils.safe_math import safe_exp
 from utils import optim
 from utils.args import Args
 
-
 # ---------------------------------------------------------------------------
 # Vertex-to-tet adjacency (from experiments/test_field_transfer.py)
 # ---------------------------------------------------------------------------
@@ -61,6 +60,9 @@ def get_expon_lr_func(
 
     return helper
 
+# ---------------------------------------------------------------------------
+# Vertex-to-tet adjacency (from experiments/test_field_transfer.py)
+# ---------------------------------------------------------------------------
 
 def build_v2t(indices: torch.Tensor, n_verts: int):
     """Build padded vertex->tet adjacency table.
@@ -271,10 +273,22 @@ def compute_transfer_weights_edge(
 
     E_old = old_unique_keys.shape[0]
 
-    # One representative old tet per old edge (last-write-wins scatter)
-    old_edge_to_tet = torch.zeros(E_old, dtype=torch.long, device=device)
+    # Best (nearest-CC) old tet per old edge: sort by descending CC-to-midpoint
+    # distance so the closest tet writes last and wins the scatter.
+    old_idx_l = old_indices.long()
+    old_vi = old_idx_l[:, _EDGE_I]  # (T_old, 6)
+    old_vj = old_idx_l[:, _EDGE_J]
+    old_va = torch.min(old_vi, old_vj)
+    old_vb = torch.max(old_vi, old_vj)
+    old_edge_midpts = (vertex_positions[old_va] + vertex_positions[old_vb]) * 0.5  # (T_old, 6, 3)
+    flat_cc_dist = (old_cc.unsqueeze(1) - old_edge_midpts).pow(2).sum(-1).reshape(-1)  # (T_old*6,)
+
+    sort_order = torch.argsort(flat_cc_dist, descending=True)
+    flat_edge_idx = old_tet_edge_idx.reshape(-1)
     tet_idx_expanded = torch.arange(T_old, device=device).unsqueeze(1).expand(-1, 6).reshape(-1)
-    old_edge_to_tet.scatter_(0, old_tet_edge_idx.reshape(-1), tet_idx_expanded)
+
+    old_edge_to_tet = torch.zeros(E_old, dtype=torch.long, device=device)
+    old_edge_to_tet.scatter_(0, flat_edge_idx[sort_order], tet_idx_expanded[sort_order])
 
     # --- Compute new edge keys and match to old ---
     new_idx = new_indices.long()
@@ -285,12 +299,37 @@ def compute_transfer_weights_edge(
     match_pos = match_pos.clamp(0, E_old - 1)
     is_matched = old_unique_keys[match_pos] == new_flat_keys
 
+    # --- Unchanged-tet skip: identify tets with identical sorted vertex quadruples ---
+    # These get exact 1:1 copy (no blending dilution).
+    old_sorted = old_indices.long().sort(dim=1).values  # (T_old, 4)
+    new_sorted = new_indices.long().sort(dim=1).values  # (T_new, 4)
+
+    # Find matching tets via torch.unique on concatenated sorted vertices
+    all_sorted = torch.cat([old_sorted, new_sorted], dim=0)  # (T_old + T_new, 4)
+    _, inverse = torch.unique(all_sorted, dim=0, sorted=True, return_inverse=True)
+    old_inverse = inverse[:T_old]
+    new_inverse = inverse[T_old:]
+
+    # Map unique tet ID → old tet index (last-write-wins; no duplicates in valid Delaunay)
+    n_unique = inverse.max().item() + 1
+    unique_to_old = torch.full((n_unique,), -1, dtype=torch.long, device=device)
+    unique_to_old.scatter_(0, old_inverse, torch.arange(T_old, device=device))
+
+    matched_old_tet = unique_to_old[new_inverse]  # (T_new,) — -1 if no match
+    is_tet_matched = matched_old_tet >= 0
+    matched_old_tet = matched_old_tet.clamp(min=0)  # safe for indexing
+
+    n_tet_matched = is_tet_matched.sum().item()
+
     # --- Fast path: matched edges → direct old tet lookup ---
     flat_cands = torch.zeros(T_new * 6, dtype=torch.long, device=device)
     flat_cands[is_matched] = old_edge_to_tet[match_pos[is_matched]]
 
     # --- Slow path: unmatched edges → v2t search (no vertex membership check) ---
-    unmatched_idx = torch.where(~is_matched)[0]
+    # Exclude edges belonging to unchanged tets (they'll be overwritten below)
+    is_changed_tet = ~is_tet_matched  # (T_new,)
+    needs_slow = ~is_matched.reshape(T_new, 6) & is_changed_tet.unsqueeze(1)
+    unmatched_idx = torch.where(needs_slow.reshape(-1))[0]
 
     if unmatched_idx.numel() > 0:
         # Recover va, vb for unmatched edges
@@ -329,6 +368,10 @@ def compute_transfer_weights_edge(
     # Reshape to (T_new, 6)
     cands = flat_cands.reshape(T_new, 6)
 
+    # For unchanged tets: set all 6 candidates to the matched old tet
+    if n_tet_matched > 0:
+        cands[is_tet_matched] = matched_old_tet[is_tet_matched].unsqueeze(1).expand(-1, 6)
+
     # Vertex overlap for 6 candidates
     cand_verts = old_indices[cands].long()               # (T_new, 6, 4)
     new_verts = new_indices.long().unsqueeze(1)           # (T_new, 1, 4)
@@ -344,6 +387,9 @@ def compute_transfer_weights_edge(
     dist_weight = 1.0 / (cc_dist_sq + 1e-8)
     raw_weights = overlap_weight * dist_weight
     weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)  # (T_new, 6) normalized
+
+    n_edge_matched = is_matched.sum().item()
+    n_edge_total = is_matched.numel()
 
     # Per-candidate density scale (edge-length ratio)
     old_el_all = _min_edge_length(vertex_positions, old_indices)  # (T_old,)
@@ -393,6 +439,7 @@ class SimpleModel(torch.nn.Module):
         self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
 
         # Per-tet learnable parameters
+        # density stores sigma (log-space); actual density = safe_exp(sigma + density_offset)
         self.density = nn.Parameter(density, requires_grad=True)
         self.gradient = nn.Parameter(gradient, requires_grad=True)
         self.rgb = nn.Parameter(rgb, requires_grad=True)
@@ -405,6 +452,7 @@ class SimpleModel(torch.nn.Module):
         self.device = self.density.device
         self.sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
         self.density_offset = density_offset
+        self.register_buffer("_density_offset", torch.tensor(density_offset))
 
         self.mask_values = False
         self.frozen = False
@@ -418,6 +466,9 @@ class SimpleModel(torch.nn.Module):
     @property
     def vertices(self) -> torch.Tensor:
         return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
+
+    def __len__(self):
+        return self.interior_vertices.shape[0] + self.ext_vertices.shape[0]
 
     @property
     def num_int_verts(self):
@@ -437,15 +488,18 @@ class SimpleModel(torch.nn.Module):
             circumcenter = circumcenters
 
         if mask is not None:
-            density = self.density[mask]
+            sigma = self.density[mask]
             grd = self.gradient[mask]
             rgb = self.rgb[mask]
             sh = self.sh[mask]
         else:
-            density = self.density
+            sigma = self.density
             grd = self.gradient
             rgb = self.rgb
             sh = self.sh
+
+        # Activate: sigma → density (matching iNGP parameterization)
+        density = safe_exp(sigma + self._density_offset)
 
         sh_dim = (self.max_sh_deg + 1) ** 2 - 1
         attr = torch.empty((density.shape[0], 0), device=grd.device)
@@ -469,13 +523,6 @@ class SimpleModel(torch.nn.Module):
             return circumcenters, density, rgb, normed_grd, sh
         else:
             return circumcenters, density, rgb, grd, sh
-
-    def __len__(self):
-        return self.vertices.shape[0]
-
-    @property
-    def num_int_verts(self):
-        return self.contracted_vertices.shape[0]
 
     def get_cell_values(
         self,
@@ -501,6 +548,13 @@ class SimpleModel(torch.nn.Module):
             self.max_sh_deg,
         )
         return sh, cell_output
+
+    def compute_adjacency(self):
+        vols = tet_volumes(self.vertices[self.indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            self.indices[reverse_mask] = self.indices[reverse_mask][:, [1, 0, 2, 3]]
+        self.faces, self.side_index = get_tet_adjacency(self.indices)
 
     def calc_tet_density(self):
         _, densities, _, _, _, _ = self.compute_batch_features(
@@ -641,10 +695,8 @@ class SimpleModel(torch.nn.Module):
         T = indices.shape[0]
         sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
 
-        # Initialize per-tet parameters
-        density = safe_exp(
-            torch.full((T, 1), density_offset, device=device)
-        )
+        # Initialize per-tet parameters (density stores sigma; actual density = exp(sigma + offset))
+        density = torch.zeros((T, 1), device=device)  # sigma=0 → density=exp(offset)
         rgb = torch.full((T, 3), 0.5, device=device)
         gradient = torch.zeros((T, 1, 3), device=device)
         sh = torch.zeros((T, sh_dim // 3, 3), device=device)
@@ -749,6 +801,7 @@ class SimpleModel(torch.nn.Module):
 
         tinyplypy.write_ply(str(path), data_dict, is_binary=True)
 
+
 # ===========================================================================
 # SimpleOptimizer
 # ===========================================================================
@@ -782,13 +835,13 @@ class SimpleOptimizer:
         self.split_std = split_std
 
         self.optim = optim.CustomAdam([
-            {"params": [model.density], "lr": freeze_lr, "name": "density"},
+            {"params": [model.density], "lr": freeze_lr * 3, "name": "density"},
             {"params": [model.rgb], "lr": freeze_lr, "name": "color"},
             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
-        ])
+        ], eps=1e-15)
         self.sh_optim = optim.CustomAdam([
             {"params": [model.sh], "lr": freeze_lr, "name": "sh"},
-        ], eps=1e-4)
+        ], eps=1e-15)
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {
@@ -859,10 +912,10 @@ class SimpleOptimizer:
             {"params": [self.model.density], "lr": lr, "name": "density"},
             {"params": [self.model.rgb], "lr": lr, "name": "color"},
             {"params": [self.model.gradient], "lr": lr, "name": "gradient"},
-        ])
+        ], eps=1e-15)
         self.sh_optim = optim.CustomAdam([
             {"params": [self.model.sh], "lr": sh_lr, "name": "sh"},
-        ], eps=1e-4)
+        ], eps=1e-15)
         self.net_optim = self.optim
 
     @staticmethod
@@ -944,30 +997,32 @@ class SimpleOptimizer:
          old_unique_keys, new_unique_keys) = result
 
         # Weighted blend of parameter values across 6 candidates
-        # Scale density per-candidate by edge-length ratio before blending
-        old_density = self.model.density.data
-        scaled_density = old_density[cands] * density_scale.unsqueeze(-1)
-        w_density = weights.unsqueeze(-1)
-        new_density = (scaled_density * w_density).sum(dim=1)
+        # density stores sigma (log-space); blend sigma + additive edge-length correction
+        old_sigma = self.model.density.data  # (T_old, 1) — sigma values
+        log_density_scale = torch.log(density_scale.unsqueeze(-1).clamp(min=1e-8))  # (T_new, 6, 1)
+        scaled_sigma = old_sigma[cands] + log_density_scale
+        w = weights.unsqueeze(-1)
+        new_sigma = (scaled_sigma * w).sum(dim=1)
 
         new_rgb = self._blend_old_values(self.model.rgb.data, cands, weights)
         new_gradient = self._blend_old_values(self.model.gradient.data, cands, weights)
         new_sh = self._blend_old_values(self.model.sh.data, cands, weights)
 
-        # --- Edge-local conservation ---
+        # --- Edge-local conservation (operates on actual density = exp(sigma + offset)) ---
+        density_offset = self.model.density_offset
         E_old = old_unique_keys.shape[0]
         E_new = new_unique_keys.shape[0]
-        device = new_density.device
+        device = new_sigma.device
 
-        # Per-edge density sums on old mesh
-        old_density_flat = old_density.squeeze(-1)  # (T_old,)
+        # Per-edge density sums on old mesh (actual density, not sigma)
+        old_actual = safe_exp(old_sigma.squeeze(-1) + density_offset)  # (T_old,)
         old_edge_density = torch.zeros(E_old, device=device)
-        old_edge_density.scatter_add_(0, old_tet_edge_idx.reshape(-1), old_density_flat.repeat_interleave(6))
+        old_edge_density.scatter_add_(0, old_tet_edge_idx.reshape(-1), old_actual.repeat_interleave(6))
 
-        # Per-edge density sums on new mesh (blended, pre-conservation)
-        new_density_flat = new_density.squeeze(-1)  # (T_new,)
+        # Per-edge density sums on new mesh (actual density from new sigma)
+        new_actual = safe_exp(new_sigma.squeeze(-1) + density_offset)  # (T_new,)
         new_edge_density = torch.zeros(E_new, device=device)
-        new_edge_density.scatter_add_(0, new_tet_edge_idx.reshape(-1), new_density_flat.repeat_interleave(6))
+        new_edge_density.scatter_add_(0, new_tet_edge_idx.reshape(-1), new_actual.repeat_interleave(6))
 
         # Per-edge RGB sums on old mesh: (E_old, 3)
         old_rgb_data = self.model.rgb.data  # (T_old, 3)
@@ -1002,14 +1057,14 @@ class SimpleOptimizer:
             rgb_r = old_rgb_matched / new_rgb_matched.clamp(min=1e-8)
             rgb_ratio_new[target_new_idx] = rgb_r.clamp(0.5, 2.0)
 
-        # Per new tet: mean ratio across its 6 edges
+        # Per new tet: mean ratio across its 6 edges → additive correction in sigma space
         tet_density_scale = density_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new,)
         tet_rgb_scale = rgb_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new, 3)
 
-        new_density = new_density * tet_density_scale.unsqueeze(-1)
+        new_sigma = new_sigma + torch.log(tet_density_scale.clamp(min=1e-8)).unsqueeze(-1)
         new_rgb = new_rgb * tet_rgb_scale
 
-        self.model.density = nn.Parameter(new_density.contiguous().requires_grad_(True))
+        self.model.density = nn.Parameter(new_sigma.contiguous().requires_grad_(True))
         self.model.rgb = nn.Parameter(new_rgb.contiguous().requires_grad_(True))
         self.model.gradient = nn.Parameter(new_gradient.contiguous().requires_grad_(True))
         self.model.sh = nn.Parameter(new_sh.contiguous().requires_grad_(True))
@@ -1064,3 +1119,9 @@ class SimpleOptimizer:
     @torch.no_grad()
     def split(self, split_point, **kwargs):
         self.add_points(split_point)
+
+    def clip_grad_norm_(self, max_norm):
+        torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.gradient, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.sh, max_norm)

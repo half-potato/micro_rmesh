@@ -1,28 +1,19 @@
-import cv2
-import os
-from pathlib import Path
-import sys
+import time
 import math
 import torch
-from data import loader
 import random
-import time
-from tqdm import tqdm
+from data import loader
 import numpy as np
-from utils.train_util import render, pad_image2even, pad_hw2even, SimpleSampler
+from utils.train_util import render, SimpleSampler
 from model import SimpleModel as Model, SimpleOptimizer as TetOptimizer
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
 import json
-import imageio
 import test_util
-import termplotlib as tpl
 import gc
 from utils.densification import collect_render_stats, apply_densification
 from utils.decimation import apply_decimation
-import mediapy
-from icecream import ic
 
 
 torch.set_num_threads(1)
@@ -37,7 +28,7 @@ eps = torch.finfo(torch.float).eps
 args = Args()
 args.tile_size = 4
 args.image_folder = "images_2"
-args.eval = False
+args.eval = True
 args.dataset_path = Path("/optane/nerf_datasets/360/bonsai")
 args.output_path = Path("output/simple_test/")
 args.iterations = 30000
@@ -78,7 +69,6 @@ args.min_tet_count = 9
 args.densify_start = 2000
 args.densify_end = 16000
 args.densify_interval = 500
-args.budget = 2_000_000
 
 args.within_thresh = 0.3 / 2.7
 args.total_thresh = 2.0
@@ -110,19 +100,16 @@ args.lambda_edge_length = 0.0
 args.noise_lr = 0.0
 
 
+# Don't touch this portion
 args = Args.from_namespace(args.get_parser().parse_args())
-
 args.output_path.mkdir(exist_ok=True, parents=True)
-
 train_cameras, test_cameras, scene_info = loader.load_dataset(
     args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval, resolution=args.resolution)
-
 np.savetxt(str(args.output_path / "transform.txt"), scene_info.transform)
-
 args.num_samples = min(len(train_cameras), args.num_samples)
-
 with (args.output_path / "config.json").open("w") as f:
     json.dump(args.as_dict(), f, cls=CustomEncoder)
+
 
 device = torch.device('cuda')
 if len(args.ckpt) > 0:
@@ -133,16 +120,6 @@ else:
 min_t = args.min_t
 
 tet_optim = TetOptimizer(model, **args.as_dict())
-if args.eval:
-    sample_camera = test_cameras[args.sample_cam]
-else:
-    sample_camera = train_cameras[args.sample_cam]
-
-camera_inds = {}
-camera_inds_back = {}
-for i, camera in enumerate(train_cameras):
-    camera_inds[camera.uid] = i
-    camera_inds_back[i] = camera.uid
 
 images = []
 psnrs = []
@@ -182,7 +159,7 @@ while True:
             high_precision=False)
 
     if len(inds) == 0:
-        print(f"PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
+        print(f"TRAIN PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
         inds = list(range(len(train_cameras)))
         random.shuffle(inds)
         psnrs = []
@@ -255,17 +232,12 @@ while True:
         with torch.no_grad():
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
 
-            render_pkg = render(sample_camera, model, min_t=min_t, tile_size=args.tile_size)
-            sample_image = render_pkg['render']
-            sample_image = sample_image.permute(1, 2, 0)
-            sample_image = (sample_image.detach().cpu().numpy()*255).clip(min=0, max=255).astype(np.uint8)
-
             gc.collect()
             torch.cuda.empty_cache()
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = args.budget - model.vertices.shape[0]
+            target_addition = test_util.VERT_BUDGET - model.vertices.shape[0]
 
             apply_densification(
                 stats,
@@ -313,18 +285,15 @@ print()
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
 
-if args.render_train:
-    splits = zip(['train', 'test'], [train_cameras, test_cameras])
-else:
-    splits = zip(['test'], [test_cameras])
+splits = zip(['test'], [test_cameras])
 results = test_util.evaluate(model, splits, args.output_path, args.tile_size, min_t, save=False)
 
 all_data = dict(
     n_vertices = model.vertices.shape[0],
-    n_interior_vertices = model.num_int_verts,
+    n_interior_vertices = model.interior_vertices.shape[0],
     n_tets = model.indices.shape[0],
     **results
 )
 print("----------")
-for k, v in all_data:
+for k, v in all_data.items():
     print(f"{k}: {v}")

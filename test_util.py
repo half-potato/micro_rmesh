@@ -10,6 +10,7 @@ from fused_ssim import fused_ssim
 from utils.train_util import render
 import matplotlib.pyplot as plt
 
+VERT_BUDGET = 500000
 TIME_BUDGET = 600
 
 torch.set_printoptions(precision=10)
@@ -80,15 +81,4 @@ def evaluate(model, splits, output_path, tile_size, min_t, save=True):
             f"{split}_LPIPS": torch.tensor(lpipss).mean().item()
         }
         
-        print(f"{split.upper()} SET METRICS:")
-        print("  SSIM : {:>12.7f}".format(results[f"{split}_mean"]["SSIM"]))
-        print("  PSNR : {:>12.7f}".format(results[f"{split}_mean"]["PSNR"]))
-        print("  LPIPS: {:>12.7f}".format(results[f"{split}_mean"]["LPIPS"]))
-        print("")
-    
-    # Save results to JSON
-    with open(os.path.join(output_path, "metrics.json"), "w") as f:
-        json.dump(results, f, indent=4)
-    
-    print(f"Metrics saved to {os.path.join(output_path, 'metrics.json')}")
     return short_results
