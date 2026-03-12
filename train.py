@@ -74,7 +74,7 @@ args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.3
 args.lambda_ssim_bw = 0.15
-args.min_t = 0.3
+args.min_t = 0.5
 args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.1
