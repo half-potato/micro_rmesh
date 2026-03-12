@@ -138,7 +138,7 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = step % args.delaunay_interval == 0
-    do_cloning = step in dschedule
+    do_cloning = step in dschedule and total_training_time < test_util.DENSIFICATION_TIME_BUDGET
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
@@ -222,6 +222,7 @@ while True:
 
     if do_cloning:
         with torch.no_grad():
+            psnrs = []
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
 
             gc.collect()

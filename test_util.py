@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 VERT_BUDGET = 500000
 TIME_BUDGET = 600
+DENSIFICATION_TIME_BUDGET = 400
 
 torch.set_printoptions(precision=10)
 
