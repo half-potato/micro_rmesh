@@ -73,7 +73,7 @@ args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.0
-args.lambda_ssim_bw = 0.2
+args.lambda_ssim_bw = 0.3
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
