@@ -474,6 +474,31 @@ class SimpleModel(torch.nn.Module):
     def num_int_verts(self):
         return self.interior_vertices.shape[0]
 
+    def calc_tet_alpha(self, mode="min", density=None):
+        alpha_list = []
+        start = 0
+        
+        verts = self.vertices
+        inds = self.indices
+        v0, v1, v2, v3 = verts[inds[:, 0]], verts[inds[:, 1]], verts[inds[:, 2]], verts[inds[:, 3]]
+        
+        edge_lengths = torch.stack([
+            torch.norm(v0 - v1, dim=1), torch.norm(v0 - v2, dim=1), torch.norm(v0 - v3, dim=1),
+            torch.norm(v1 - v2, dim=1), torch.norm(v1 - v3, dim=1), torch.norm(v2 - v3, dim=1)
+        ], dim=0)
+        if mode == "min":
+            el = edge_lengths.min(dim=0)[0]
+        elif mode == "max":
+            el = edge_lengths.max(dim=0)[0]
+        elif mode == "mean":
+            el = edge_lengths.mean(dim=0)
+        else:
+            raise ValueError(f"Unknown mode: {mode}. Use 'min', 'max', or 'mean'.")
+        
+        density = self.calc_tet_density() if density is None else density
+        alpha = 1 - torch.exp(-density.reshape(-1) * el.reshape(-1))
+        return alpha
+
     def compute_batch_features(
         self,
         vertices: torch.Tensor,
