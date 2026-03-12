@@ -27,11 +27,8 @@ class CustomEncoder(json.JSONEncoder):
 eps = torch.finfo(torch.float).eps
 args = Args()
 args.tile_size = 4
-args.image_folder = "images_2"
-args.eval = True
-args.dataset_path = Path("/optane/nerf_datasets/360/bonsai")
-args.output_path = Path("output/simple_test/")
-args.iterations = 30000
+args.image_folder = "images_4"
+args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.ckpt = ""
 args.resolution = 1
 args.render_train = False
@@ -42,8 +39,8 @@ args.sh_interval = 0
 args.sh_step = 1
 
 # SimpleModel uses freeze_lr/final_freeze_lr for per-tet param LR
-args.freeze_lr = 1e-3
-args.final_freeze_lr = 1e-4
+args.freeze_lr = 3e-2
+args.final_freeze_lr = 3e-3
 args.additional_attr = 0
 args.density_offset = -3
 
@@ -75,8 +72,8 @@ args.total_thresh = 2.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
-args.lambda_ssim = 0.2
-args.lambda_ssim_bw = 0.0
+args.lambda_ssim = 0.0
+args.lambda_ssim_bw = 0.2
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
@@ -102,13 +99,8 @@ args.noise_lr = 0.0
 
 # Don't touch this portion
 args = Args.from_namespace(args.get_parser().parse_args())
-args.output_path.mkdir(exist_ok=True, parents=True)
 train_cameras, test_cameras, scene_info = loader.load_dataset(
-    args.dataset_path, args.image_folder, data_device=args.data_device, eval=args.eval, resolution=args.resolution)
-np.savetxt(str(args.output_path / "transform.txt"), scene_info.transform)
-args.num_samples = min(len(train_cameras), args.num_samples)
-with (args.output_path / "config.json").open("w") as f:
-    json.dump(args.as_dict(), f, cls=CustomEncoder)
+    args.dataset_path, args.image_folder, data_device=args.data_device, eval=True, resolution=args.resolution)
 
 
 device = torch.device('cuda')
@@ -286,7 +278,7 @@ torch.cuda.synchronize()
 torch.cuda.empty_cache()
 
 splits = zip(['test'], [test_cameras])
-results = test_util.evaluate(model, splits, args.output_path, args.tile_size, min_t, save=False)
+results = test_util.evaluate(model, splits, "", args.tile_size, min_t, save=False)
 
 all_data = dict(
     n_vertices = model.vertices.shape[0],

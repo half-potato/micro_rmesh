@@ -2,6 +2,10 @@
 
 This is an experiment to have the LLM do its own research.
 
+## Premise
+
+This is an implementation of neural radiance fields represented by a delaunay triangulation, where each cell has a constant density, and linear color.
+
 ## Setup
 
 To set up a new experiment, work with the user to:
@@ -10,8 +14,13 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b micro_rmesh/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+   - `train.py` — one of the files you modify. Optimizer, training loop
+   - `model.py` — one of the files you modify. Model architecture
+   - `utils/densification.py` — controls how vertices are added
+   - `utils/decimation.py` — controls how edges are removed
+   - `utils/model_util.py` — Important details about how linear colors are processed and activated
+   - `rmesh_renderer/slang/alphablend_shader_interp.slang` — The main alpha blending loop
+   - `rmesh_renderer/slang/interp_version.slang` — Handles integration across each primitive.
 4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 5. **Confirm and go**: Confirm setup looks good.
 
@@ -22,12 +31,20 @@ Once you get confirmation, kick off the experimentation.
 Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 10 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+- Modify `train.py` — training loop, hyperparameters, loss functions, scheduling.
+- Modify `model.py` — model architecture, optimizer, Delaunay triangulation, parameter transfer.
+- Modify `utils/densification.py` — vertex cloning/splitting strategy.
+- Modify `utils/decimation.py` — edge collapse strategy.
+- Modify `utils/model_util.py` — feature activation, color field processing.
+- Modify `utils/optim.py` — custom Adam optimizer wrapper.
+- Everything is fair game: architecture, optimizer, hyperparameters, training loop, batch size, model size, densification/decimation strategy, loss functions, etc.
 
 **What you CANNOT do:**
-- Modify `data/*`. It is read-only. It contains the fixed data loading, which loads camera intrinsics, extrinsics, and associated images
-- Modify `submodules/*`. It is read-only. It contains the ssim and LPIPS metrics
-- Modify `test_util.py`. It is read-only. It contains the function by which the method is evaluated
+- Modify `data/*`. It is read-only. It contains camera/dataset loading (COLMAP format, intrinsics, extrinsics, images).
+- Modify `rmesh_renderer/*`. It is read-only. It contains the Slang-based tile rendering pipeline and shaders.
+- Modify `submodules/*`. It is read-only. It contains the LPIPS metric (`lpipsPyTorch`).
+- Modify `test_util.py`. It is read-only. It contains the evaluation function and the constants `VERT_BUDGET` (500k) and `TIME_BUDGET` (600s).
+- Modify `utils/train_util.py`. It is read-only. It contains the `render()` function.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate` function in `test_util.py` is the ground truth metric.
 
@@ -44,12 +61,19 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 Once the script finishes it prints a summary like this:
 
 ```
+----------
+n_vertices: 51358
+n_interior_vertices: 48201
+n_tets: 301245
+test_SSIM: 0.812
+test_PSNR: 20.5
+test_LPIPS: 0.312
 ```
 
-Note that the script is configured to always stop after 10 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+Note that the script is configured to always stop after 10 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metrics from the log file:
 
 ```
-grep "^PSNR:" run.log
+grep "^test_PSNR:\|^n_vertices:" run.log
 ```
 
 ## Logging results
@@ -84,13 +108,13 @@ The experiment runs on a dedicated branch (e.g. `micro_rmesh/mar5` or `micro_rme
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
+2. Tune `train.py, model.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^PSNR:\|^peak_vram_mb:" run.log`
+5. Read out the results: `grep "^test_PSNR:\|^n_vertices:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If PSNR improved (lower), you "advance" the branch, keeping the git commit
+8. If PSNR improved (higher is better), you "advance" the branch, keeping the git commit
 9. If PSNR is equal or worse, you git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
