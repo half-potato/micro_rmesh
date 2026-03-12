@@ -5,3 +5,4 @@ f4ff71a	19.8571	4.3212	354347	discard	delaunay_interval 300 (PSNR dropped)
 728ee94	12.2730	4.2280	367151	discard	freeze_lr 5e-2 (PSNR cratered)
 c5caf5f	18.3983	3.7073	385290	discard	lambda_dist 0.02 (PSNR dropped)
 33b9ab8	13.4089	4.9690	397619	discard	early densify at step 100 (PSNR cratered)
+688b637	20.0983	4.5132	329722	keep	max_sh_deg 2
