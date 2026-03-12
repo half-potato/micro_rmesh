@@ -67,8 +67,8 @@ args.densify_start = 500
 args.densify_end = 16000
 args.densify_interval = 500
 
-args.within_thresh = 0.3 / 2.7
-args.total_thresh = 2.0
+args.within_thresh = 0.05
+args.total_thresh = 1.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
