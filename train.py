@@ -94,7 +94,7 @@ args.decimate_threshold = 0.0
 args.lambda_edge_length = 0.0
 
 # MCMC-style vertex noise (SGLD)
-args.noise_lr = 0.0
+args.noise_lr = 5e-5
 
 
 # Don't touch this portion
