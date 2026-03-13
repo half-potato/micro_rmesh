@@ -53,7 +53,7 @@ args.vertices_lr_delay_multi = 1e-8
 args.delaunay_interval = 200
 
 # Distortion Settings
-args.lambda_dist = 0.005
+args.lambda_dist = 0.01
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
@@ -72,7 +72,7 @@ args.total_thresh = 2.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
-args.lambda_ssim = 0.3
+args.lambda_ssim = 0.35
 args.lambda_ssim_bw = 0.15
 args.min_t = 0.4
 args.sample_cam = 8
