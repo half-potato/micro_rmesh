@@ -26,7 +26,7 @@ class CustomEncoder(json.JSONEncoder):
 
 eps = torch.finfo(torch.float).eps
 args = Args()
-args.tile_size = 4
+args.tile_size = 8
 args.image_folder = "images_4"
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.ckpt = ""
