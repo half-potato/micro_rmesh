@@ -18,6 +18,13 @@ from utils.decimation import apply_decimation
 
 torch.set_num_threads(1)
 
+# Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, PosixPath):
