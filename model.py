@@ -925,8 +925,11 @@ class SimpleOptimizer:
                 self.vertex_lr = lr
                 param_group["lr"] = lr
 
-    def regularizer(self, render_pkg, lambda_weight_decay=0, **kwargs):
-        return 0.0
+    def regularizer(self, render_pkg, lambda_weight_decay=0, lambda_density_reg=0, **kwargs):
+        reg = 0.0
+        if lambda_density_reg > 0:
+            reg = reg + lambda_density_reg * self.model.density.pow(2).mean()
+        return reg
 
     def _rebuild_optim(self):
         """Rebuild per-tet optimizers from current model parameters.
