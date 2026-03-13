@@ -1,7 +1,0 @@
-commit	PSNR	n_vertices	status	description
-1d2a0e0	10.073627	153051	keep	baseline
-40cb537	14.402439	302345	keep	delaunay_interval 50 + densify earlier/more frequent + fewer samples
-f5d8e4e	0.000000	0	crash	exp2: higher LR + early culling (calc_tet_alpha missing then shape mismatch)
-345deb3	11.436576	326281	discard	exp3: freeze_lr 5e-2 too high - unstable after densification
-580aeca	20.387863	230789	keep	exp4: delaunay_interval 100 + densify_interval 500 + no decimation
-7e81824	14.701885	293072	discard	exp5: lambda_ssim=0.2 hurt stability after densification
