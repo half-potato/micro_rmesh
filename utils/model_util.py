@@ -99,6 +99,6 @@ def activate_output(camera_center, density, rgb, grd, sh, attr, indices, circumc
         sh,
         camera_center,
         current_sh_deg).float()
-    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=10)
+    base_color_v0 = torch.nn.functional.softplus(tet_color_raw.reshape(-1, 3, 1), beta=5)
     features = torch.cat([density, base_color_v0.reshape(-1, 3), normed_grd.reshape(-1, 3), attr], dim=1)
     return features.float()

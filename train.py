@@ -59,7 +59,7 @@ args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
 
 # Clone Settings
-args.num_samples = 40
+args.num_samples = 50
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
