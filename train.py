@@ -53,13 +53,13 @@ args.vertices_lr_delay_multi = 1e-8
 args.delaunay_interval = 200
 
 # Distortion Settings
-args.lambda_dist = 0.0075
+args.lambda_dist = 0.01
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
 
 # Clone Settings
-args.num_samples = 30
+args.num_samples = 25
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
@@ -77,10 +77,10 @@ args.lambda_ssim_bw = 0.15
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
-args.density_threshold = 0.15
+args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
-args.threshold_start = 3500
+args.threshold_start = 4500
 args.voxel_size = 0.01
 
 # Decimation Settings
