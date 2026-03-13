@@ -835,7 +835,7 @@ class SimpleOptimizer:
         self.split_std = split_std
 
         self.optim = optim.CustomAdam([
-            {"params": [model.density], "lr": freeze_lr * 2, "name": "density"},
+            {"params": [model.density], "lr": freeze_lr * 1.5, "name": "density"},
             {"params": [model.rgb], "lr": freeze_lr, "name": "color"},
             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
         ], eps=1e-15)
