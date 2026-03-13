@@ -77,10 +77,10 @@ args.lambda_ssim_bw = 0.15
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
-args.density_threshold = 0.2
-args.alpha_threshold = 0.1
+args.density_threshold = 0.15
+args.alpha_threshold = 0.2
 args.contrib_threshold = 0.0
-args.threshold_start = 3000
+args.threshold_start = 3500
 args.voxel_size = 0.01
 
 # Decimation Settings
