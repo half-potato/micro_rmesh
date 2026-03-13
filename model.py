@@ -863,10 +863,10 @@ class SimpleOptimizer:
             {"params": [model.density], "lr": freeze_lr * 3, "name": "density"},
             {"params": [model.rgb], "lr": freeze_lr, "name": "color"},
             {"params": [model.gradient], "lr": freeze_lr, "name": "gradient"},
-        ], eps=1e-15)
+        ], eps=1e-8)
         self.sh_optim = optim.CustomAdam([
             {"params": [model.sh], "lr": freeze_lr, "name": "sh"},
-        ], eps=1e-15)
+        ], eps=1e-8)
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {
@@ -937,10 +937,10 @@ class SimpleOptimizer:
             {"params": [self.model.density], "lr": lr, "name": "density"},
             {"params": [self.model.rgb], "lr": lr, "name": "color"},
             {"params": [self.model.gradient], "lr": lr, "name": "gradient"},
-        ], eps=1e-15)
+        ], eps=1e-8)
         self.sh_optim = optim.CustomAdam([
             {"params": [self.model.sh], "lr": sh_lr, "name": "sh"},
-        ], eps=1e-15)
+        ], eps=1e-8)
         self.net_optim = self.optim
 
     @staticmethod
