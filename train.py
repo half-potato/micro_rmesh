@@ -77,10 +77,10 @@ args.lambda_ssim_bw = 0.15
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
-args.density_threshold = 0.1
+args.density_threshold = 0.15
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
-args.threshold_start = 4500
+args.threshold_start = 3500
 args.voxel_size = 0.01
 
 # Decimation Settings
@@ -123,7 +123,7 @@ num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
-dschedule = [200, 350, 550, 800, 1150, 1600, 2200, 3000, 4000, 5500]
+dschedule = [200, 350, 550, 800, 1150, 1600, 2200, 3000]
 dschedule_decimate = list(range(args.decimate_start, args.decimate_end, args.decimate_interval))
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, device)
