@@ -53,13 +53,13 @@ args.vertices_lr_delay_multi = 1e-8
 args.delaunay_interval = 200
 
 # Distortion Settings
-args.lambda_dist = 0.01
+args.lambda_dist = 0.009
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
 
 # Clone Settings
-args.num_samples = 50
+args.num_samples = 30
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
@@ -94,7 +94,7 @@ args.decimate_threshold = 0.0
 args.lambda_edge_length = 0.0
 
 # MCMC-style vertex noise (SGLD)
-args.noise_lr = 5e-5
+args.noise_lr = 0.0
 
 
 # Don't touch this portion
