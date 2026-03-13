@@ -42,7 +42,7 @@ args.sh_step = 1
 args.freeze_lr = 3e-2
 args.final_freeze_lr = 3e-3
 args.additional_attr = 0
-args.density_offset = -3
+args.density_offset = -4
 
 # Vertex Settings
 args.lr_delay = 0
@@ -173,7 +173,7 @@ while True:
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg.get('distortion_loss', 0.0)
-    loss = (1-args.lambda_ssim)*l2_loss + \
+    loss = (1-args.lambda_ssim)*l1_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
            args.lambda_opacity * (1-render_pkg['alpha']).mean() + \
