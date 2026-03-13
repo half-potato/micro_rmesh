@@ -1008,61 +1008,7 @@ class SimpleOptimizer:
         new_gradient = self._blend_old_values(self.model.gradient.data, cands, weights)
         new_sh = self._blend_old_values(self.model.sh.data, cands, weights)
 
-        # --- Edge-local conservation (operates on actual density = exp(sigma + offset)) ---
-        density_offset = self.model.density_offset
-        E_old = old_unique_keys.shape[0]
-        E_new = new_unique_keys.shape[0]
-        device = new_sigma.device
-
-        # Per-edge density sums on old mesh (actual density, not sigma)
-        old_actual = safe_exp(old_sigma.squeeze(-1) + density_offset)  # (T_old,)
-        old_edge_density = torch.zeros(E_old, device=device)
-        old_edge_density.scatter_add_(0, old_tet_edge_idx.reshape(-1), old_actual.repeat_interleave(6))
-
-        # Per-edge density sums on new mesh (actual density from new sigma)
-        new_actual = safe_exp(new_sigma.squeeze(-1) + density_offset)  # (T_new,)
-        new_edge_density = torch.zeros(E_new, device=device)
-        new_edge_density.scatter_add_(0, new_tet_edge_idx.reshape(-1), new_actual.repeat_interleave(6))
-
-        # Per-edge RGB sums on old mesh: (E_old, 3)
-        old_rgb_data = self.model.rgb.data  # (T_old, 3)
-        old_edge_rgb = torch.zeros(E_old, 3, device=device)
-        old_edge_idx_exp = old_tet_edge_idx.reshape(-1).unsqueeze(1).expand(-1, 3)
-        old_edge_rgb.scatter_add_(0, old_edge_idx_exp, old_rgb_data.repeat_interleave(6, dim=0))
-
-        # Per-edge RGB sums on new mesh: (E_new, 3)
-        new_edge_rgb = torch.zeros(E_new, 3, device=device)
-        new_edge_idx_exp = new_tet_edge_idx.reshape(-1).unsqueeze(1).expand(-1, 3)
-        new_edge_rgb.scatter_add_(0, new_edge_idx_exp, new_rgb.repeat_interleave(6, dim=0))
-
-        # Match old→new edges via searchsorted on sorted unique keys
-        match_idx = torch.searchsorted(new_unique_keys, old_unique_keys)
-        match_idx = match_idx.clamp(0, E_new - 1)
-        matched = new_unique_keys[match_idx] == old_unique_keys  # (E_old,)
-
-        # Density ratio per new edge (default 1.0 for unmatched)
-        density_ratio_new = torch.ones(E_new, device=device)
-        if matched.any():
-            target_new_idx = match_idx[matched]
-            old_sum_matched = old_edge_density[matched]
-            new_sum_matched = new_edge_density[target_new_idx]
-            ratio = old_sum_matched / new_sum_matched.clamp(min=1e-8)
-            density_ratio_new[target_new_idx] = ratio.clamp(0.5, 2.0)
-
-        # RGB ratio per new edge: (E_new, 3), default 1.0
-        rgb_ratio_new = torch.ones(E_new, 3, device=device)
-        if matched.any():
-            old_rgb_matched = old_edge_rgb[matched]  # (n_matched, 3)
-            new_rgb_matched = new_edge_rgb[target_new_idx]  # (n_matched, 3)
-            rgb_r = old_rgb_matched / new_rgb_matched.clamp(min=1e-8)
-            rgb_ratio_new[target_new_idx] = rgb_r.clamp(0.5, 2.0)
-
-        # Per new tet: mean ratio across its 6 edges → additive correction in sigma space
-        tet_density_scale = density_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new,)
-        tet_rgb_scale = rgb_ratio_new[new_tet_edge_idx].mean(dim=1)  # (T_new, 3)
-
-        new_sigma = new_sigma + torch.log(tet_density_scale.clamp(min=1e-8)).unsqueeze(-1)
-        new_rgb = new_rgb * tet_rgb_scale
+        # Skip edge-local conservation — rely on weighted blending alone
 
         self.model.density = nn.Parameter(new_sigma.contiguous().requires_grad_(True))
         self.model.rgb = nn.Parameter(new_rgb.contiguous().requires_grad_(True))
