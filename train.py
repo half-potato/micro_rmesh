@@ -75,7 +75,7 @@ args.split_min_contrib = 10/255
 args.lambda_ssim = 0.3
 args.lambda_ssim_bw = 0.15
 args.min_t = 0.4
-args.sample_cam = 16
+args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
@@ -123,7 +123,7 @@ num_densify_iter = args.densify_end - args.densify_start
 N = num_densify_iter // args.densify_interval + 1
 S = model.vertices.shape[0]
 
-dschedule = [200, 350, 550, 800, 1150, 1600, 2200, 3000]
+dschedule = [300, 700, 1300, 2200, 3500]
 dschedule_decimate = list(range(args.decimate_start, args.decimate_end, args.decimate_interval))
 
 densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, device)
