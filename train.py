@@ -42,7 +42,7 @@ args.sh_step = 1
 args.freeze_lr = 3e-2
 args.final_freeze_lr = 3e-3
 args.additional_attr = 0
-args.density_offset = -4
+args.density_offset = -3
 
 # Vertex Settings
 args.lr_delay = 0
@@ -69,8 +69,8 @@ args.densify_interval = 500
 
 args.within_thresh = 0.3 / 2.7
 args.total_thresh = 2.0
-args.clone_min_contrib = 5/255
-args.split_min_contrib = 10/255
+args.clone_min_contrib = 10/255
+args.split_min_contrib = 20/255
 
 args.lambda_ssim = 0.3
 args.lambda_ssim_bw = 0.15
