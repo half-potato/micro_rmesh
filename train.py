@@ -34,7 +34,7 @@ args.resolution = 1
 args.render_train = False
 
 # Light Settings
-args.max_sh_deg = 2
+args.max_sh_deg = 1
 args.sh_interval = 0
 args.sh_step = 1
 
@@ -50,14 +50,14 @@ args.vert_lr_delay = 0
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
-args.delaunay_interval = 200
+args.delaunay_interval = 100
 
 # Distortion Settings
 args.lambda_dist = 0.01
 args.lambda_norm = 0.0
 args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
-args.lambda_density_reg = 1e-4
+args.lambda_density_reg = 5e-5
 
 # Clone Settings
 args.num_samples = 50
@@ -73,8 +73,8 @@ args.total_thresh = 2.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
-args.lambda_ssim = 0.3
-args.lambda_ssim_bw = 0.15
+args.lambda_ssim = 0.2
+args.lambda_ssim_bw = 0.3
 args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
