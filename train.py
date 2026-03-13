@@ -26,7 +26,7 @@ class CustomEncoder(json.JSONEncoder):
 
 eps = torch.finfo(torch.float).eps
 args = Args()
-args.tile_size = 8
+args.tile_size = 4
 args.image_folder = "images_4"
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.ckpt = ""
@@ -173,7 +173,7 @@ while True:
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
     ssim_loss = (1-fused_ssim(image.unsqueeze(0), target.unsqueeze(0))).clip(min=0, max=1)
     dl_loss = render_pkg.get('distortion_loss', 0.0)
-    loss = (1-args.lambda_ssim)*l1_loss + \
+    loss = (1-args.lambda_ssim)*l2_loss + \
            args.lambda_ssim*ssim_loss + \
            reg + \
            args.lambda_opacity * (1-render_pkg['alpha']).mean() + \
