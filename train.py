@@ -59,7 +59,7 @@ args.lambda_sh = 0.0
 args.lambda_opacity = 0.0
 
 # Clone Settings
-args.num_samples = 50
+args.num_samples = 30
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
@@ -69,8 +69,8 @@ args.densify_interval = 500
 
 args.within_thresh = 0.3 / 2.7
 args.total_thresh = 2.0
-args.clone_min_contrib = 10/255
-args.split_min_contrib = 20/255
+args.clone_min_contrib = 5/255
+args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.3
 args.lambda_ssim_bw = 0.15
