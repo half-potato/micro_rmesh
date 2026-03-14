@@ -62,3 +62,6 @@ output/*
 nv_profiles/*
 *.pkl
 *.ply
+
+# Experiment results log (must survive git resets)
+results.tsv

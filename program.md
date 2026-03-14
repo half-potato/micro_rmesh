@@ -21,7 +21,7 @@ To set up a new experiment, work with the user to:
    - `utils/model_util.py` — Important details about how linear colors are processed and activated
    - `rmesh_renderer/slang/alphablend_shader_interp.slang` — The main alpha blending loop
    - `rmesh_renderer/slang/interp_version.slang` — Handles integration across each primitive.
-4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
 5. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -113,7 +113,7 @@ LOOP FOREVER:
 4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^test_PSNR:\|^n_vertices:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+7. Record the results in the tsv. **CRITICAL: `results.tsv` is in `.gitignore` and must NEVER be staged or committed. It is the persistent experiment log that must survive all git resets. Before any `git add`, verify results.tsv is not being staged.**
 8. If PSNR improved (higher is better), you "advance" the branch, keeping the git commit
 9. If PSNR is equal or worse, you git reset back to where you started
 
@@ -136,3 +136,6 @@ You are operating in a continuous optimization loop. To ensure commands execute 
 3. **No Heredocs**: NEVER use `<<EOF` or similar multi-line string inputs in the terminal.
 4. **No Piping or Redirection**: NEVER use `|`, `>`, or `<`. If you need to read `run.log`, use your built-in file reading capabilities instead of `cat`, `sed`, or `grep`.
 5. **Simple Git Commits**: For commits, use a single-line message: `git commit -m "Short message"`. If a multi-line message is absolutely required, write the text to a temporary file using the file system tool, then execute `git commit -F temp_msg.txt`.
+6. **No Process Substitution Characters**: NEVER use the character sequences `>(` or `<(` anywhere in your commands, including inside quotes or commit messages. If logging parameter changes, use words instead of arrows (e.g., write "clamp 0.5 to 0.3" instead of "clamp ->(0.3)").
+7. **No Inline Bash Loops**: NEVER use `while`, `for`, or command chaining (`;`) in the terminal to wait for a process or poll logs. 
+8. **Scripted Polling**: To poll `run.log` for metrics, write the logic to a standalone script (e.g., `wait_for_metrics.sh`), make it executable, and run it with a simple `./wait_for_metrics.sh`.
