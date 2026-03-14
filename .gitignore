@@ -65,3 +65,7 @@ nv_profiles/*
 
 # Experiment results log (must survive git resets)
 results.tsv
+
+# Planning files (must survive git resets)
+plan.md
+journal.md

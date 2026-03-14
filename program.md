@@ -21,9 +21,10 @@ To set up a new experiment, work with the user to:
    - `utils/model_util.py` — Important details about how linear colors are processed and activated
    - `rmesh_renderer/slang/alphablend_shader_interp.slang` — The main alpha blending loop
    - `rmesh_renderer/slang/interp_version.slang` — Handles integration across each primitive.
-4. **Read run.log**: If `run.log` exists from a previous run, read it to understand the current training behavior, metrics, and any issues.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
-6. **Confirm and go**: Confirm setup looks good.
+4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
+5. **Confirm and go**: Confirm setup looks good.
+6. **Initial planning phase**: Before running the baseline, analyze the architecture for optimization opportunities. Read all in-scope files carefully and write an initial experiment plan to `plan.md` (see the **plan.md format** below) with the first 5–10 experiment ideas ranked by expected impact. Append the summary to `journal.md` (see the **journal.md format** below). **Both `plan.md` and `journal.md` must stay untracked by git** — like `results.tsv`, they must never be staged, committed, or affected by git resets. Verify they are in `.gitignore`.
+7. **Set up planning cron**: Create a recurring cron job (~every hour) to trigger a planning session. Use `CronCreate` with a prompt like: *"Follow the Planning Session procedure in program.md. Read program.md first for the full instructions."* This ensures periodic strategic review rather than ad-hoc experimentation.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -127,6 +128,92 @@ The idea is that you are a completely autonomous researcher trying things out. I
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~10 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+
+## Planning Sessions
+
+Planning sessions are triggered either by the hourly cron job (set up in step 7) or manually. When a planning session fires, follow these steps:
+
+### Step 1: Deep run.log investigation
+
+Read `run.log` fully — do NOT just grep the final metrics. Extract and analyze:
+
+- **PSNR convergence curve**: The `TRAIN PSNR: X.XX #V: Y #T: Z` lines show how the model trains over time. Is PSNR still climbing at the end (more training time would help)? Does it plateau early (architecture bottleneck)?
+- **Densification events**: Lines like `#Grow: X #Split: Y | #Alive: Z | Total Avg: A Within Avg: B` show when and how the mesh grows. Are densifications causing PSNR drops? How long does recovery take? Are grow/split ratios healthy?
+- **Vertex trajectory**: Track #V over time. Is the model using the full vertex budget (500k)? If not, densification might be too conservative. If it hits 500k early, the budget is being used up before training converges.
+- **Loss patterns**: Look for anomalies — sudden PSNR drops, oscillation, failure to recover after densification.
+
+### Step 2: Review results.tsv
+
+- Look at keep/discard/crash patterns across all experiments
+- Identify which categories of changes tend to improve PSNR (e.g., LR changes, architecture changes, densification strategy)
+- Note diminishing returns — are recent experiments showing smaller gains?
+
+### Step 3: Read recent git log
+
+- Understand what's been tried recently
+- Look at the trajectory of ideas
+
+### Step 4: Write plan.md
+
+Overwrite `plan.md` with the new plan using the **plan.md format** below.
+
+### Step 5: Append to journal.md
+
+Read the `## Summary` section from `plan.md` and append it as a new entry in `journal.md` using the **journal.md format** below.
+
+### Step 6: Resume
+
+Continue the experiment loop with the top-ranked experiment from the plan.
+
+---
+
+## plan.md format
+
+`plan.md` is a structured, overwritable working document. Overwrite it each planning session:
+
+```markdown
+# Experiment Plan
+Date: YYYY-MM-DD HH:MM
+Current best PSNR: <value>
+Experiments completed: <count>
+
+## Run Log Analysis
+- Convergence: <was PSNR still rising at end? plateau? oscillating?>
+- Densification: <how many events? PSNR drop/recovery pattern?>
+- Vertex usage: <final #V vs 500k budget>
+- Key observation: <most important insight from the training trajectory>
+
+## Results Review
+- Best result: <exp description> (PSNR X.XX)
+- What's working: <pattern>
+- What's not working: <pattern>
+- Crash rate: <N/M experiments crashed>
+
+## Next Experiments
+1. <idea> — rationale: <why, based on analysis above>
+2. <idea> — rationale: <why>
+3. <idea> — rationale: <why>
+4. ...
+
+## Summary
+<2-3 sentence summary for journal>
+```
+
+## journal.md format
+
+`journal.md` is an append-only log. Each planning session appends a new section:
+
+```markdown
+# Experiment Journal
+
+---
+### YYYY-MM-DD HH:MM — Planning Session
+Best PSNR: <value> | Experiments: <count>
+<summary from plan.md>
+Next: <top 3 planned experiments>
+```
+
+---
 
 # Autonomous Execution & Syntax Constraints
 

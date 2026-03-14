@@ -18,6 +18,13 @@ from utils.decimation import apply_decimation
 
 torch.set_num_threads(1)
 
+# Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, PosixPath):
@@ -50,7 +57,7 @@ args.vert_lr_delay = 0
 args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
-args.delaunay_interval = 200
+args.delaunay_interval = 300
 
 # Distortion Settings
 args.lambda_dist = 0.0
@@ -67,8 +74,8 @@ args.densify_start = 500
 args.densify_end = 16000
 args.densify_interval = 500
 
-args.within_thresh = 0.3 / 2.7
-args.total_thresh = 2.0
+args.within_thresh = 0.05
+args.total_thresh = 1.0
 args.clone_min_contrib = 5/255
 args.split_min_contrib = 10/255
 
