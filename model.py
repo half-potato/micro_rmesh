@@ -1016,6 +1016,7 @@ class SimpleOptimizer:
         orphan_tets = (new_indices >= n_old).any(dim=1)
         if orphan_tets.any():
             verts = self.model.vertices
+            device = verts.device
             orphan_idx = torch.where(orphan_tets)[0]
             orphan_centroids = verts[new_indices[orphan_idx].long()].float().mean(dim=1)
             old_centroids = verts[old_indices.long()].float().mean(dim=1)
