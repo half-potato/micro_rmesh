@@ -1064,6 +1064,37 @@ class SimpleOptimizer:
         new_sigma = new_sigma + torch.log(tet_density_scale.clamp(min=1e-8)).unsqueeze(-1)
         new_rgb = new_rgb * tet_rgb_scale
 
+        # Override orphan tets (containing new vertices not in old mesh)
+        # by copying from the nearest old tet by centroid distance.
+        n_old = old_indices.max().item() + 1
+        orphan_tets = (new_indices >= n_old).any(dim=1)
+        if orphan_tets.any():
+            verts = self.model.vertices
+            orphan_idx = torch.where(orphan_tets)[0]
+            orphan_centroids = verts[new_indices[orphan_idx].long()].float().mean(dim=1)
+            old_centroids = verts[old_indices.long()].float().mean(dim=1)
+
+            n_orphan = orphan_idx.shape[0]
+            T_old = old_indices.shape[0]
+            nearest = torch.zeros(n_orphan, dtype=torch.long, device=device)
+            chunk = 512
+            cc_chunk = 50_000
+            for s in range(0, n_orphan, chunk):
+                e = min(s + chunk, n_orphan)
+                best_d = torch.full((e - s,), float("inf"), device=device)
+                for cs in range(0, T_old, cc_chunk):
+                    ce = min(cs + cc_chunk, T_old)
+                    d = (orphan_centroids[s:e].unsqueeze(1) - old_centroids[cs:ce].unsqueeze(0)).pow(2).sum(-1)
+                    min_d, min_i = d.min(dim=1)
+                    improved = min_d < best_d
+                    best_d[improved] = min_d[improved]
+                    nearest[s:e][improved] = min_i[improved] + cs
+
+            new_sigma[orphan_idx] = self.model.density.data[nearest]
+            new_rgb[orphan_idx] = self.model.rgb.data[nearest]
+            new_gradient[orphan_idx] = self.model.gradient.data[nearest]
+            new_sh[orphan_idx] = self.model.sh.data[nearest]
+
         self.model.density = nn.Parameter(new_sigma.contiguous().requires_grad_(True))
         self.model.rgb = nn.Parameter(new_rgb.contiguous().requires_grad_(True))
         self.model.gradient = nn.Parameter(new_gradient.contiguous().requires_grad_(True))

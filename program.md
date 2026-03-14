@@ -21,8 +21,9 @@ To set up a new experiment, work with the user to:
    - `utils/model_util.py` — Important details about how linear colors are processed and activated
    - `rmesh_renderer/slang/alphablend_shader_interp.slang` — The main alpha blending loop
    - `rmesh_renderer/slang/interp_version.slang` — Handles integration across each primitive.
-4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
-5. **Confirm and go**: Confirm setup looks good.
+4. **Read run.log**: If `run.log` exists from a previous run, read it to understand the current training behavior, metrics, and any issues.
+5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
+6. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
