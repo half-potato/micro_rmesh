@@ -23,7 +23,7 @@ To set up a new experiment, work with the user to:
    - `rmesh_renderer/slang/interp_version.slang` — Handles integration across each primitive.
 4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run. **Verify that `results.tsv` is listed in `.gitignore`** — it must never be staged, committed, or affected by git resets.
 5. **Confirm and go**: Confirm setup looks good.
-6. **Initial planning phase**: Before running the baseline, analyze the architecture for optimization opportunities. Read all in-scope files carefully and write an initial experiment plan to `plan.md` (see the **plan.md format** below) with the first 5–10 experiment ideas ranked by expected impact. Append the summary to `journal.md` (see the **journal.md format** below). **Both `plan.md` and `journal.md` must stay untracked by git** — like `results.tsv`, they must never be staged, committed, or affected by git resets. Verify they are in `.gitignore`.
+6. **Initial planning phase**: Before running the baseline, analyze the architecture for optimization opportunities. Read all in-scope files carefully and write an initial experiment plan to `plan.md` (see the **plan.md format** below) with 5–10 hypotheses ranked by priority. Each hypothesis must have explicit accept/reject/inconclusive criteria. Append the initial session to `journal.md` (see the **journal.md format** below). **Both `plan.md` and `journal.md` must stay untracked by git** — like `results.tsv`, they must never be staged, committed, or affected by git resets. Verify they are in `.gitignore`.
 7. **Set up planning cron**: Create a recurring cron job (~every hour) to trigger a planning session. Use `CronCreate` with a prompt like: *"Follow the Planning Session procedure in program.md. Read program.md first for the full instructions."* This ensures periodic strategic review rather than ad-hoc experimentation.
 
 Once you get confirmation, kick off the experimentation.
@@ -109,15 +109,23 @@ The experiment runs on a dedicated branch (e.g. `micro_rmesh/mar5` or `micro_rme
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py, model.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^test_PSNR:\|^n_vertices:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv. **CRITICAL: `results.tsv` is in `.gitignore` and must NEVER be staged or committed. It is the persistent experiment log that must survive all git resets. Before any `git add`, verify results.tsv is not being staged.**
-8. If PSNR improved (higher is better), you "advance" the branch, keeping the git commit
-9. If PSNR is equal or worse, you git reset back to where you started
+Each hypothesis gets a **series of ~5 experiments** (~53 minutes total) to properly test it. This allows two-tail exploration (the current setting could be too high or too low) and gives enough data points to draw a real conclusion.
+
+**For each hypothesis:**
+
+1. Look at the git state: the current branch/commit we're on. Note the starting commit — this is your **revert point** for the hypothesis.
+2. Pick the next hypothesis from `plan.md` (highest priority first). If the plan is exhausted, trigger a planning session.
+3. Run all experiments in the hypothesis's experiment plan sequentially (typically ~5 runs):
+   a. Implement the next experiment in the plan by modifying the code.
+   b. git commit (message should reference the hypothesis and experiment, e.g. "H1.3: LR 0.02")
+   c. Run: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+   d. Read results: `grep "^test_PSNR:\|^n_vertices:" run.log`
+   e. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't fix it quickly, log "crash" and move to the next experiment in the plan.
+   f. Record in `results.tsv`. **CRITICAL: `results.tsv` is in `.gitignore` and must NEVER be staged or committed. It is the persistent experiment log that must survive all git resets. Before any `git add`, verify results.tsv is not being staged.**
+   g. Git reset back to the revert point before starting the next experiment (each experiment tests independently from the same baseline).
+4. **Judge the hypothesis**: After all ~5 experiments are done, evaluate the results as a group against the accept/reject/inconclusive criteria. Append the verdict to `journal.md`.
+5. If ACCEPT: re-apply the best-performing experiment's changes (the one with highest PSNR), commit, and advance the branch. This becomes the new baseline for subsequent hypotheses.
+6. If REJECT or INCONCLUSIVE: ensure you're at the revert point. Move on to the next hypothesis.
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
@@ -127,7 +135,7 @@ The idea is that you are a completely autonomous researcher trying things out. I
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~10 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+As an example use case, a user might leave you running while they sleep. Each hypothesis takes ~53 minutes (5 experiments × ~10 min + overhead), so you can test roughly 1 hypothesis per hour, or about 8 hypotheses over an 8-hour sleep. The user wakes up to a clean hypothesis journal showing which ideas panned out and which didn't.
 
 ## Planning Sessions
 
@@ -155,11 +163,11 @@ Read `run.log` fully — do NOT just grep the final metrics. Extract and analyze
 
 ### Step 4: Write plan.md
 
-Overwrite `plan.md` with the new plan using the **plan.md format** below.
+Overwrite `plan.md` with the new plan using the **plan.md format** below. Frame each planned experiment as a hypothesis with explicit accept/reject/inconclusive criteria. Hypotheses should be grounded in the run log analysis (Step 1) and results review (Step 2) — not just random ideas.
 
 ### Step 5: Append to journal.md
 
-Read the `## Summary` section from `plan.md` and append it as a new entry in `journal.md` using the **journal.md format** below.
+Start a new session section in `journal.md` using the **journal.md format** below. If there are completed experiments since the last planning session whose results haven't been logged yet, add their hypothesis outcomes to the table.
 
 ### Step 6: Resume
 
@@ -169,7 +177,7 @@ Continue the experiment loop with the top-ranked experiment from the plan.
 
 ## plan.md format
 
-`plan.md` is a structured, overwritable working document. Overwrite it each planning session:
+`plan.md` is a structured, overwritable working document. Overwrite it each planning session. Each experiment is framed as a **hypothesis** — a testable claim about what will improve PSNR and why. This forces precise thinking and makes results interpretable.
 
 ```markdown
 # Experiment Plan
@@ -189,29 +197,107 @@ Experiments completed: <count>
 - What's not working: <pattern>
 - Crash rate: <N/M experiments crashed>
 
-## Next Experiments
-1. <idea> — rationale: <why, based on analysis above>
-2. <idea> — rationale: <why>
-3. <idea> — rationale: <why>
-4. ...
+## Hypotheses to Test
+Each hypothesis is a **two-tail test**: the current setting might be too high, too low, or just wrong in some direction. The experiment plan explores both sides to find where the optimum lies. Each hypothesis gets ~5 experiments (~53 minutes).
 
-## Summary
-<2-3 sentence summary for journal>
+### H<N>: <short title>
+- **Claim**: <what you believe is suboptimal and why — rooted in the run log analysis or prior results>
+- **Experiments** (~5 runs exploring the parameter space in both directions):
+  1. <concrete change — e.g. parameter value or code modification>
+  2. <another variation>
+  3. <...>
+  4. <...>
+  5. <...>
+- **Accept if**: <at least one experiment clearly beats baseline — specific threshold>
+- **Reject if**: <all experiments perform at or below baseline — the current setting was already near-optimal>
+- **Inconclusive if**: <results are noisy, crashes prevent clean comparison, or best is within noise floor>
+- **Priority**: <1-5, 1=highest>
+
+Examples:
+
+### H1: Learning rates are suboptimal
+- **Claim**: The default LRs may be too conservative (slow convergence visible in run.log) or too aggressive (oscillation in late training). Testing both directions reveals where the optimum lies.
+- **Experiments**:
+  1. Halve all LRs (position_lr, feature_lr, etc.)
+  2. Double all LRs
+  3. 1.5x all LRs
+  4. 0.7x all LRs
+  5. Best direction from above with LR schedule (cosine decay to 0.1x)
+- **Accept if**: Any run beats baseline PSNR by >= 0.1
+- **Reject if**: All runs within ±0.05 of baseline — current LRs are near-optimal
+- **Inconclusive if**: Mixed results with no clear trend, or crashes obscure the picture
+- **Priority**: 1
+
+### H2: Densification schedule is poor
+- **Claim**: The densification timing/frequency may be leaving PSNR on the table — too early wastes vertices before gradients are informative, too late leaves no time to train new geometry. The grow/split thresholds may also be miscalibrated.
+- **Experiments**:
+  1. Start densification 2x earlier (halve densify_from_iter)
+  2. Start densification 2x later (double densify_from_iter)
+  3. Densify more frequently (halve densify_every)
+  4. Densify less frequently (double densify_every)
+  5. Adjust grow/split thresholds based on best timing from above
+- **Accept if**: Any run beats baseline PSNR by >= 0.1
+- **Reject if**: All runs within ±0.05 of baseline
+- **Inconclusive if**: Vertex counts vary wildly making comparison unfair, or crashes
+- **Priority**: 2
+
+### H3: SSIM loss weight is mistuned
+- **Claim**: The SSIM/L1 loss balance affects what the model optimizes for. The current weight may over- or under-emphasize structural similarity vs. pixel accuracy, leaving PSNR on the table.
+- **Experiments**:
+  1. Increase SSIM weight by 50%
+  2. Decrease SSIM weight by 50%
+  3. Remove SSIM entirely (pure L1)
+  4. Double SSIM weight
+  5. Best weight from above + window size adjustment
+- **Accept if**: Any run beats baseline PSNR by >= 0.1
+- **Reject if**: All runs within ±0.05 of baseline — current balance is near-optimal
+- **Inconclusive if**: PSNR improves but SSIM/LPIPS degrade significantly (metric tradeoff, not a clear win)
+- **Priority**: 3
 ```
 
 ## journal.md format
 
-`journal.md` is an append-only log. Each planning session appends a new section:
+`journal.md` is an append-only **hypothesis log**. It records tested hypotheses and their outcomes. This keeps the journal compact and makes patterns across experiments easy to spot.
+
+Each planning session appends a new session header. Each hypothesis is appended when its full experiment series completes (~5 runs).
 
 ```markdown
-# Experiment Journal
+# Hypothesis Journal
 
----
-### YYYY-MM-DD HH:MM — Planning Session
-Best PSNR: <value> | Experiments: <count>
-<summary from plan.md>
-Next: <top 3 planned experiments>
+## Session: YYYY-MM-DD HH:MM
+Best PSNR: <value> | Hypotheses tested: <count>
+Key insight: <1 sentence — most important learning from this batch>
+
+### H1: Learning rates are suboptimal — ACCEPT
+Baseline: 27.4 | Best: 27.8 (1.5x LRs) | Worst: 26.9 (0.5x LRs)
+| Run | Variation | PSNR | Notes |
+|-----|----------|------|-------|
+| H1.1 | 0.5x all LRs | 26.9 | Underfit, still climbing at end |
+| H1.2 | 2x all LRs | 27.5 | Slight improvement, some oscillation |
+| H1.3 | 1.5x all LRs | 27.8 | Best result, smooth convergence |
+| H1.4 | 0.7x all LRs | 27.2 | Marginal, slow convergence |
+| H1.5 | 1.5x + cosine decay | 27.7 | Decay didn't help over flat |
+Verdict: Current LRs too conservative. 1.5x applied as new baseline.
+
+### H2: Densification schedule is poor — REJECT
+Baseline: 27.8 | Best: 27.85 (less frequent) | Worst: 27.3 (2x earlier)
+| Run | Variation | PSNR | Notes |
+|-----|----------|------|-------|
+| H2.1 | 2x earlier start | 27.3 | Wasted vertices on noise |
+| H2.2 | 2x later start | 27.6 | Fewer vertices but cleaner |
+| H2.3 | 2x more frequent | 27.5 | Too many small densifications |
+| H2.4 | 2x less frequent | 27.85 | Within noise floor |
+| H2.5 | Adjusted thresholds | 27.7 | No clear win |
+Verdict: Schedule is roughly optimal. No variation beat baseline beyond noise.
 ```
+
+### Result categories
+- **ACCEPT**: At least one experiment clearly beat baseline past the threshold. The best variation is kept and becomes the new baseline.
+- **REJECT**: No experiment meaningfully beat baseline — the current setting is near-optimal. Revert all.
+- **INCONCLUSIVE**: Results too noisy, too many crashes, or conflicting signals. Revert, note for potential revisit with tighter controls.
+
+### Between planning sessions
+As each hypothesis series completes, append its full block (header + table + verdict) to `journal.md`.
 
 ---
 
