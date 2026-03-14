@@ -41,7 +41,7 @@ args.resolution = 1
 args.render_train = False
 
 # Light Settings
-args.max_sh_deg = 3
+args.max_sh_deg = 1
 args.sh_interval = 0
 args.sh_step = 1
 
@@ -72,7 +72,7 @@ args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 500
 args.densify_end = 16000
-args.densify_interval = 500
+args.densify_interval = 400
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
