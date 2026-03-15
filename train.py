@@ -72,7 +72,7 @@ args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 500
 args.densify_end = 16000
-args.densify_interval = 400
+args.densify_interval = 600
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
@@ -87,7 +87,7 @@ args.data_device = 'cpu'
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
-args.threshold_start = 4500
+args.threshold_start = 3000
 args.voxel_size = 0.01
 
 # Decimation Settings
