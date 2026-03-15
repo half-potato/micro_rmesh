@@ -87,7 +87,7 @@ args.data_device = 'cpu'
 args.density_threshold = 0.1
 args.alpha_threshold = 0.1
 args.contrib_threshold = 0.0
-args.threshold_start = 3000
+args.threshold_start = 2500
 args.voxel_size = 0.01
 
 # Decimation Settings
