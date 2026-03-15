@@ -1054,8 +1054,10 @@ class SimpleOptimizer:
         cull_mask = None
         if density_threshold > 0 or alpha_threshold > 0:
             tet_density = self.model.calc_tet_density()
-            tet_alpha = self.model.calc_tet_alpha(mode="min", density=tet_density)
-            cull_mask = (tet_density > density_threshold) | (tet_alpha > alpha_threshold)
+            cull_mask = tet_density > density_threshold
+            if alpha_threshold > 0 and hasattr(self.model, 'calc_tet_alpha'):
+                tet_alpha = self.model.calc_tet_alpha(mode="min", density=tet_density)
+                cull_mask = cull_mask | (tet_alpha > alpha_threshold)
             self.model.empty_indices = self.model.indices[~cull_mask]
             self.model.indices = self.model.indices[cull_mask]
             self.model.density = nn.Parameter(self.model.density.data[cull_mask].contiguous().requires_grad_(True))
