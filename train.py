@@ -72,7 +72,7 @@ args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 500
 args.densify_end = 16000
-args.densify_interval = 600
+args.densify_interval = 700
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
@@ -85,7 +85,7 @@ args.min_t = 0.4
 args.sample_cam = 8
 args.data_device = 'cpu'
 args.density_threshold = 0.2
-args.alpha_threshold = 0.2
+args.alpha_threshold = 0.0
 args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
