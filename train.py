@@ -70,7 +70,7 @@ args.num_samples = 50
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
-args.densify_start = 500
+args.densify_start = 300
 args.densify_end = 16000
 args.densify_interval = 700
 
