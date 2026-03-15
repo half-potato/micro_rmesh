@@ -76,7 +76,7 @@ args.densify_interval = 700
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
-args.clone_min_contrib = 5/255
+args.clone_min_contrib = 2/255
 args.split_min_contrib = 10/255
 
 args.lambda_ssim = 0.0
