@@ -49,7 +49,7 @@ args.sh_step = 1
 args.freeze_lr = 3e-2
 args.final_freeze_lr = 3e-3
 args.additional_attr = 0
-args.density_offset = -3
+args.density_offset = -4
 
 # Vertex Settings
 args.lr_delay = 0
