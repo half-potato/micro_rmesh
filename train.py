@@ -1,3 +1,12 @@
+import os, glob, shutil
+
+# Clear stale compilation caches/locks before any imports trigger JIT compilation
+_slang_cache = os.path.join(os.path.dirname(__file__), "rmesh_renderer", "slang", ".slangtorch_cache")
+if os.path.isdir(_slang_cache):
+    shutil.rmtree(_slang_cache)
+for _lock in glob.glob(os.path.expanduser("~/.cache/torch_extensions/*/sort_by_keys/lock")):
+    os.remove(_lock)
+
 import time
 import math
 import torch
