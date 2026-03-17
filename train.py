@@ -79,9 +79,9 @@ args.num_samples = 50
 args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
-args.densify_start = 300
-args.densify_end = 1100
-args.densify_interval = 700
+args.densify_start = 200
+args.densify_end = 1000
+args.densify_interval = 500
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
@@ -161,6 +161,7 @@ while True:
 
     if do_delaunay:
         st = time.time()
+        # tet_optim.undo_useless_splits(threshold=0.01)
         tet_optim.update_triangulation(
             density_threshold=args.density_threshold if step > args.threshold_start else 0,
             alpha_threshold=args.alpha_threshold if step > args.threshold_start else 0,

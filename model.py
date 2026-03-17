@@ -1188,8 +1188,114 @@ class SimpleOptimizer:
         model.device = model.density.device
         torch.cuda.empty_cache()
 
+        # Store metadata for undo — centroids are at end of vertex array,
+        # siblings are at end of tet array
+        n_kept = kept_indices.shape[0]
+        self._split_info = {
+            'centroid_vert_idx': centroid_idx.clone(),   # (K,) vertex indices
+            'parent_vert_idx': split_tet_verts.clone(),  # (K, 4) original tet vertices
+            'sibling_start': n_kept,                     # start of siblings in tet array
+            'K': K,
+            'V_old': V_old,                              # vertex count before adding centroids
+        }
+
         print(f"Split {K} tets in-place (1-to-4): "
               f"#T: {new_indices.shape[0]}, #V: {model.vertices.shape[0]}")
+
+    @torch.no_grad()
+    def undo_useless_splits(self, threshold=0.5):
+        """Check sibling groups from last split. Undo splits where parameters
+        haven't diverged — remove centroid vertex, restore parent tet."""
+        if not hasattr(self, '_split_info') or self._split_info is None:
+            return 0
+
+        info = self._split_info
+        K = info['K']
+        sib_start = info['sibling_start']
+        centroid_vi = info['centroid_vert_idx']
+        parent_vi = info['parent_vert_idx']
+        V_old = info['V_old']
+        model = self.model
+
+        # Check divergence for each group of 4 siblings
+        undo = torch.zeros(K, dtype=torch.bool, device=model.device)
+        for i in range(K):
+            s = sib_start + 4 * i
+            if s + 4 > model.density.shape[0]:
+                continue
+            sib_sigma = model.density.data[s:s+4].squeeze()
+            if sib_sigma.var() < threshold:
+                undo[i] = True
+
+        n_undo = undo.sum().item()
+        if n_undo == 0:
+            self._split_info = None
+            return 0
+
+        # Build tet keep mask: keep all non-sibling tets + kept (diverged) siblings
+        n_tets = model.indices.shape[0]
+        tet_keep = torch.ones(n_tets, dtype=torch.bool, device=model.device)
+        for i in range(K):
+            if undo[i]:
+                s = sib_start + 4 * i
+                tet_keep[s:s+4] = False
+
+        # Build vertex keep mask: remove undone centroids
+        n_int = model.interior_vertices.shape[0]
+        vert_keep = torch.ones(n_int, dtype=torch.bool, device=model.device)
+        undo_centroid_vi = centroid_vi[undo]
+        vert_keep[undo_centroid_vi[undo_centroid_vi < n_int]] = False
+
+        # Build vertex remap (old index → new index after removal)
+        # Centroids are at end, so original vertices (< V_old) are unaffected
+        n_ext = model.ext_vertices.shape[0]
+        full_keep = torch.cat([vert_keep, torch.ones(n_ext, dtype=torch.bool, device=model.device)])
+        remap = torch.cumsum(full_keep.int(), dim=0) - 1
+
+        # Remap surviving tet indices
+        kept_indices = remap[model.indices[tet_keep].long()].int()
+
+        # Build restored parent tets (vertex indices < V_old, unaffected by remap)
+        parent_tets = parent_vi[undo]  # (n_undo, 4)
+
+        # Parent params: average of 4 siblings
+        parent_density = []
+        parent_rgb = []
+        parent_gradient = []
+        parent_sh = []
+        for i in range(K):
+            if undo[i]:
+                s = sib_start + 4 * i
+                parent_density.append(model.density.data[s:s+4].mean(dim=0))
+                parent_rgb.append(model.rgb.data[s:s+4].mean(dim=0))
+                parent_gradient.append(model.gradient.data[s:s+4].mean(dim=0))
+                parent_sh.append(model.sh.data[s:s+4].mean(dim=0))
+
+        new_indices = torch.cat([kept_indices, parent_tets.int()], dim=0)
+
+        new_density = torch.cat([model.density.data[tet_keep], torch.stack(parent_density)], dim=0)
+        new_rgb = torch.cat([model.rgb.data[tet_keep], torch.stack(parent_rgb)], dim=0)
+        new_gradient = torch.cat([model.gradient.data[tet_keep], torch.stack(parent_gradient)], dim=0)
+        new_sh = torch.cat([model.sh.data[tet_keep], torch.stack(parent_sh)], dim=0)
+
+        model.density = nn.Parameter(new_density.contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(new_rgb.contiguous().requires_grad_(True))
+        model.gradient = nn.Parameter(new_gradient.contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(new_sh.contiguous().requires_grad_(True))
+        model.indices = new_indices
+
+        # Prune vertices from optimizer
+        model.interior_vertices = self.vertex_optim.prune_optimizer(vert_keep)["interior_vertices"]
+
+        # Rebuild per-tet optimizers (fresh state)
+        self._rebuild_optim()
+        model.device = model.density.device
+        self._split_info = None
+        torch.cuda.empty_cache()
+
+        print(f"Undid {n_undo}/{K} splits, removed {n_undo} vertices "
+              f"(#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+        return n_undo
 
     def clip_grad_norm_(self, max_norm):
         torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
