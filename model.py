@@ -1100,6 +1100,97 @@ class SimpleOptimizer:
     def split(self, split_point, **kwargs):
         self.add_points(split_point)
 
+    @staticmethod
+    def _restore_adam_state_split(custom_adam, saved, keep_mask, split_idx):
+        """Restore Adam state for 1-to-4 split: keep non-split, repeat split 4x."""
+        for group in custom_adam.param_groups:
+            name = group['name']
+            if name not in saved:
+                continue
+            param = group['params'][0]
+            old = saved[name]
+
+            ea_kept = old['exp_avg'][keep_mask]
+            ea_split = old['exp_avg'][split_idx].repeat_interleave(4, dim=0)
+
+            ea_sq_kept = old['exp_avg_sq'][keep_mask]
+            ea_sq_split = old['exp_avg_sq'][split_idx].repeat_interleave(4, dim=0)
+
+            custom_adam.optimizer.state[param] = {
+                'step': old['step'].clone(),
+                'exp_avg': torch.cat([ea_kept, ea_split], dim=0),
+                'exp_avg_sq': torch.cat([ea_sq_kept, ea_sq_split], dim=0),
+            }
+
+    @torch.no_grad()
+    def split_tets_inplace(self, split_mask):
+        """1-to-4 split of selected tets at their centroids.
+        Zero-disruption: sub-tets get exact copies of parent parameters.
+        No retriangulation — the next periodic delaunay_interval handles that."""
+        model = self.model
+        split_idx = torch.where(split_mask)[0]
+        K = split_idx.shape[0]
+        if K == 0:
+            return
+
+        # 1. Compute centroids of tets to split
+        split_tet_verts = model.indices[split_idx].long()  # (K, 4)
+        verts = model.vertices
+        V_old = verts.shape[0]
+        centroids = verts[split_tet_verts].float().mean(dim=1)  # (K, 3)
+
+        # 2. Add centroid vertices to interior_vertices (extends optimizer)
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=centroids)
+        )["interior_vertices"]
+
+        centroid_idx = torch.arange(V_old, V_old + K, device=model.device)
+
+        # 3. Build new indices: keep non-split tets, replace each split tet with 4 sub-tets
+        keep_mask = ~split_mask
+        kept_indices = model.indices[keep_mask]  # (T-K, 4)
+
+        v0 = split_tet_verts[:, 0]
+        v1 = split_tet_verts[:, 1]
+        v2 = split_tet_verts[:, 2]
+        v3 = split_tet_verts[:, 3]
+        c = centroid_idx
+
+        sub_tets = torch.stack([
+            torch.stack([c, v1, v2, v3], dim=1),
+            torch.stack([v0, c, v2, v3], dim=1),
+            torch.stack([v0, v1, c, v3], dim=1),
+            torch.stack([v0, v1, v2, c], dim=1),
+        ], dim=1).reshape(-1, 4)  # (4*K, 4)
+
+        new_indices = torch.cat([kept_indices, sub_tets], dim=0).int()
+
+        # 4. Build new per-tet parameters: keep non-split, repeat split 4x
+        old_optim_state = self._save_adam_state(self.optim)
+        old_sh_state = self._save_adam_state(self.sh_optim)
+
+        def keep_and_repeat(tensor):
+            return torch.cat([tensor[keep_mask], tensor[split_idx].repeat_interleave(4, dim=0)], dim=0)
+
+        model.density = nn.Parameter(keep_and_repeat(model.density.data).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(keep_and_repeat(model.rgb.data).contiguous().requires_grad_(True))
+        model.gradient = nn.Parameter(keep_and_repeat(model.gradient.data).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(keep_and_repeat(model.sh.data).contiguous().requires_grad_(True))
+        model.indices = new_indices
+
+        # 5. Rebuild optimizers and restore state with same keep/repeat pattern
+        self._rebuild_optim()
+        if old_optim_state:
+            self._restore_adam_state_split(self.optim, old_optim_state, keep_mask, split_idx)
+        if old_sh_state:
+            self._restore_adam_state_split(self.sh_optim, old_sh_state, keep_mask, split_idx)
+
+        model.device = model.density.device
+        torch.cuda.empty_cache()
+
+        print(f"Split {K} tets in-place (1-to-4): "
+              f"#T: {new_indices.shape[0]}, #V: {model.vertices.shape[0]}")
+
     def clip_grad_norm_(self, max_norm):
         torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)

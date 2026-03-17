@@ -238,13 +238,8 @@ def apply_densification(
         clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
         clone_mask[selected_indices] = True
 
-    clone_indices = model.indices[clone_mask]
-    split_point, bad = get_approx_ray_intersections(stats.within_var_rays)
-    split_point = split_point[clone_mask]
-    bad = bad[clone_mask]
-    # Clamped intersection is already inside tet bbox; no fallback needed
-
-    tet_optim.split(split_point, **args.as_dict())
+    # 1-to-4 split at centroids — zero disruption, exact parameter copy
+    tet_optim.split_tets_inplace(clone_mask)
 
     gc.collect()
     torch.cuda.empty_cache()
