@@ -80,8 +80,8 @@ args.k_samples = 1
 args.trunc_sigma = 0.35
 args.min_tet_count = 9
 args.densify_start = 200
-args.densify_end = 1000
-args.densify_interval = 500
+args.densify_end = 900
+args.densify_interval = 300
 
 args.within_thresh = 0.05
 args.total_thresh = 1.0
@@ -221,7 +221,7 @@ while True:
         tet_optim.sh_optim.step()
         tet_optim.sh_optim.zero_grad()
 
-    if do_delaunay:
+    if step % 5 == 0:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
@@ -247,7 +247,7 @@ while True:
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = test_util.VERT_BUDGET - model.vertices.shape[0]
+            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 50000)
 
             apply_densification(
                 stats,
@@ -276,6 +276,9 @@ while True:
 
     psnr = -20 * math.log10(math.sqrt(l2_loss.detach().cpu().clip(min=1e-6).item()))
     psnrs.append(psnr)
+
+    if step % 50 == 0:
+        print(f"[step {step:5d}] PSNR={psnr:.2f} #V={len(model)} #T={model.indices.shape[0]} t={total_training_time:.1f}s")
 
     if step == 0:
         gc.collect()
