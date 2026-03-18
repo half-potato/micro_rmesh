@@ -217,8 +217,24 @@ Goals: Break through the 20.80 PSNR plateau. Investigate Delaunay disruption, sp
   4. Delaunay retriangulation IS essential — removing it drops quality by 0.6 dB
   5. Loss function changes (SSIM, L2, distortion) don't improve PSNR on this system
   6. The system is robust to parameter changes — gains come from structural improvements
+### Investigation 5: Vertex LR tuning for frequent updates
+
+**Question**: Should vertex LR change since we're updating 60x more frequently?
+
+**Results**:
+| Change | PSNR | Notes |
+|---|---|---|
+| vertices_lr=1e-4 (baseline) | 21.48 | Optimal |
+| vertices_lr=2e-5 | 21.33 | Too slow |
+| vertices_lr=3e-4 | 21.18 | Too fast, unstable |
+| vert_lr_delay=200 | 21.43 | No clear effect |
+| SGLD noise_lr=0.01 | 21.40 | No effect |
+| num_samples=100 | 21.28 | More tets, slower |
+
+**Discovery**: The original vertex LR (1e-4) is already well-tuned even at the higher update frequency. The exponential LR schedule handles the adaptation naturally. No parameter changes improve upon the committed config.
+
 - **Open questions for next shift**:
-  - Can vertex LR be tuned for the higher update frequency (currently using same LR schedule)?
+  - Can we further improve by changing how Delaunay transfers parameters (reduce the ~10dB disruption)?
   - Does the vertex opt frequency interact with Delaunay interval?
   - Can we push further with 4+ splits now that vertex opt is more frequent?
-  - Is there an optimal vertex LR warmup for newly-added centroid vertices?
+  - Try different scenes beyond bicycle
