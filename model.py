@@ -630,6 +630,75 @@ class SimpleModel(torch.nn.Module):
                 old_indices, old_tet_edge_idx, new_tet_edge_idx,
                 old_unique_keys, new_unique_keys)
 
+    @torch.no_grad()
+    def fast_retriangulate(self):
+        """Fast Delaunay retriangulation with direct tet-to-tet copy (no blending).
+
+        For periodic retriangulation where vertices moved slightly:
+        - Unchanged tets (same sorted vertices): direct 1:1 parameter copy
+        - Changed tets: copy from nearest old tet by circumcenter distance
+
+        Returns (remap, new_indices) where remap[i] = old tet index for new tet i,
+        or None on failure.
+        """
+        old_indices = self.indices.clone()
+        verts = self.vertices
+        T_old = old_indices.shape[0]
+        device = old_indices.device
+
+        # Retriangulate
+        v = Del(verts.shape[0])
+        indices_np, prev = v.compute(verts.detach().cpu().double())
+        valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
+        indices_np = indices_np[valid_mask.all(axis=1)]
+        del prev
+
+        new_indices = torch.as_tensor(indices_np).cuda()
+        vols = tet_volumes(verts[new_indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            new_indices[reverse_mask] = new_indices[reverse_mask][:, [1, 0, 2, 3]]
+
+        T_new = new_indices.shape[0]
+
+        # --- Match unchanged tets (same sorted vertex quadruple) ---
+        old_sorted = old_indices.long().sort(dim=1).values
+        new_sorted = new_indices.long().sort(dim=1).values
+        all_sorted = torch.cat([old_sorted, new_sorted], dim=0)
+        _, inverse = torch.unique(all_sorted, dim=0, sorted=True, return_inverse=True)
+
+        n_unique = inverse.max().item() + 1
+        unique_to_old = torch.full((n_unique,), -1, dtype=torch.long, device=device)
+        unique_to_old.scatter_(0, inverse[:T_old], torch.arange(T_old, device=device))
+
+        remap = unique_to_old[inverse[T_old:]]  # (T_new,) — -1 if no match
+        is_matched = remap >= 0
+        n_matched = is_matched.sum().item()
+
+        # --- For unmatched tets: find nearest old tet by centroid distance ---
+        if n_matched < T_new:
+            unmatched_idx = torch.where(~is_matched)[0]
+            new_centroids = verts[new_indices[unmatched_idx].long()].float().mean(dim=1)
+            old_centroids = verts[old_indices.long()].float().mean(dim=1)
+
+            # Chunked nearest-neighbor search (small chunks to avoid OOM)
+            chunk = 512
+            cc_chunk = 50_000
+            for s in range(0, unmatched_idx.shape[0], chunk):
+                e = min(s + chunk, unmatched_idx.shape[0])
+                best_d = torch.full((e - s,), float("inf"), device=device)
+                best_i = torch.zeros(e - s, dtype=torch.long, device=device)
+                for cs in range(0, T_old, cc_chunk):
+                    ce = min(cs + cc_chunk, T_old)
+                    d = (new_centroids[s:e].unsqueeze(1) - old_centroids[cs:ce].unsqueeze(0)).pow(2).sum(-1)
+                    min_d, min_i = d.min(dim=1)
+                    improved = min_d < best_d
+                    best_d[improved] = min_d[improved]
+                    best_i[improved] = min_i[improved] + cs
+                remap[unmatched_idx[s:e]] = best_i
+
+        return remap, new_indices, n_matched, T_new, old_indices
+
     @staticmethod
     def init_from_pcd(
         point_cloud,
@@ -979,6 +1048,66 @@ class SimpleOptimizer:
                 'exp_avg_sq': new_exp_avg_sq,
             }
 
+    # --- fast retriangulation (direct copy, no blending) ---
+    def fast_update_triangulation(self):
+        """Fast path: direct tet-to-tet copy with no blending or optimizer rebuild.
+        Returns False if match rate is too low (caller should use full path)."""
+        result = self.model.fast_retriangulate()
+        if result is None:
+            return True
+        remap, new_indices, n_matched, T_new, old_indices = result
+
+        # Fall back to full path if too many tets changed
+        match_rate = n_matched / T_new if T_new > 0 else 1.0
+        if match_rate < 0.5:
+            print(f"  Fast Delaunay: match rate {match_rate:.1%} too low, using full path")
+            # Restore old indices and use full path
+            self.model.indices = old_indices.int()
+            return False
+
+        # Direct index copy of all parameters
+        self.model.density = nn.Parameter(self.model.density.data[remap].contiguous().requires_grad_(True))
+        self.model.rgb = nn.Parameter(self.model.rgb.data[remap].contiguous().requires_grad_(True))
+        self.model.gradient = nn.Parameter(self.model.gradient.data[remap].contiguous().requires_grad_(True))
+        self.model.sh = nn.Parameter(self.model.sh.data[remap].contiguous().requires_grad_(True))
+        self.model.indices = new_indices.int()
+        self.model.empty_indices = torch.empty((0, 4), dtype=self.model.indices.dtype, device="cuda")
+
+        # Remap Adam state by direct indexing (no blending)
+        def remap_adam(custom_adam, remap_idx):
+            for group in custom_adam.param_groups:
+                s = custom_adam.optimizer.state.get(group['params'][0])
+                old_step = s['step'].clone() if s and 'step' in s else None
+                old_ea = s['exp_avg'][remap_idx] if s and 'exp_avg' in s else None
+                old_ea_sq = s['exp_avg_sq'][remap_idx] if s and 'exp_avg_sq' in s else None
+
+                if group['params'][0] in custom_adam.optimizer.state:
+                    del custom_adam.optimizer.state[group['params'][0]]
+
+                # Update param reference to new tensor
+                if group['name'] == 'density':
+                    group['params'][0] = self.model.density
+                elif group['name'] == 'color':
+                    group['params'][0] = self.model.rgb
+                elif group['name'] == 'gradient':
+                    group['params'][0] = self.model.gradient
+                elif group['name'] == 'sh':
+                    group['params'][0] = self.model.sh
+
+                if old_ea is not None:
+                    custom_adam.optimizer.state[group['params'][0]] = {
+                        'step': old_step,
+                        'exp_avg': old_ea,
+                        'exp_avg_sq': old_ea_sq,
+                    }
+
+        remap_adam(self.optim, remap)
+        remap_adam(self.sh_optim, remap)
+        self.net_optim = self.optim
+        self.model.device = self.model.density.device
+        print(f"  Fast Delaunay: {n_matched}/{T_new} matched ({match_rate:.1%})")
+        return True
+
     # --- triangulation update with optimizer state transfer ---
     def update_triangulation(self, density_threshold=0.0, alpha_threshold=0.0, **kwargs):
         # Save Adam state before retriangulation
@@ -1125,7 +1254,7 @@ class SimpleOptimizer:
     @torch.no_grad()
     def split_tets_inplace(self, split_mask):
         """1-to-4 split of selected tets at their centroids.
-        Zero-disruption: sub-tets get exact copies of parent parameters.
+        Sub-tets get exact copies of parent parameters.
         No retriangulation — the next periodic delaunay_interval handles that."""
         model = self.model
         split_idx = torch.where(split_mask)[0]

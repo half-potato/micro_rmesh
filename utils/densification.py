@@ -238,7 +238,7 @@ def apply_densification(
         clone_mask = torch.zeros_like(clone_mask, dtype=torch.bool)
         clone_mask[selected_indices] = True
 
-    # 1-to-4 split at centroids — zero disruption, exact parameter copy
+    # 1-to-4 split at centroids
     tet_optim.split_tets_inplace(clone_mask)
 
     gc.collect()

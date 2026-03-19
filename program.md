@@ -31,6 +31,8 @@ Once you get confirmation, begin the first shift.
 
 Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 10 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
 
+**Real-time logging**: Python buffers stdout by default, so `run.log` won't update until the buffer flushes. Use `PYTHONUNBUFFERED=1 uv run train.py` or `uv run python -u train.py` to get real-time output. This is essential for monitoring experiments as they run.
+
 **What you CAN do:**
 - Modify `train.py` — training loop, hyperparameters, loss functions, scheduling.
 - Modify `model.py` — model architecture, optimizer, Delaunay triangulation, parameter transfer.
@@ -95,6 +97,8 @@ You are an autonomous researcher. Your work is organized into **shifts** — foc
 
 ### Pre-shift planning (with user)
 
+**First**: Read `journal.md` in full to understand all previous discoveries, failed experiments, and open questions. This is essential context — without it you'll repeat work or miss insights from prior shifts.
+
 Before each shift, discuss:
 - What are the most interesting open questions about this system?
 - What did we learn from the previous shift?
@@ -106,16 +110,17 @@ The user may also just say "go" — in that case, identify your own questions ba
 
 Your work follows four steps. These aren't rigid phases — you'll cycle through them naturally as you investigate. But every piece of work you do should fit into one of these:
 
-#### 1. OBSERVE — Find something surprising or unexplained
+#### 1. OBSERVE — Instrument the code, then read what it tells you
 
-Read `run.log` as a story, not a metric dump. Read the code paths that actually execute. Find the gap between what you expected and what happened.
+Observation starts with **instrumentation**. Before you can find something surprising, you need the code to show you what's happening. Add `print()` statements, log per-step statistics, dump intermediate tensors. Instrument first, then read the output.
 
+- **Add logging to the code**: Print per-step PSNR, gradient norms, density distributions, vertex counts, timing — whatever is relevant to your question. The code is your lab notebook; make it talk to you.
 - **PSNR convergence curve**: Are there unexpected drops? Is PSNR still climbing at the end? Does it plateau?
 - **Densification events**: How much PSNR drops after densification and how long recovery takes is often the most important signal.
 - **Vertex trajectory**: Is the model using the vertex budget effectively?
 - **Code reading**: Trace through the actual code paths. Understand *what the code does*, not just what the parameters control.
 
-The goal of observation is **a question**, not an answer. "Why does PSNR drop 5dB after densification?" is a good observation. "PSNR is 20.7" is just a number.
+Read `run.log` as a story, not a metric dump. Find the gap between what you expected and what happened. The goal of observation is **a question**, not an answer. "Why does PSNR drop 5dB after densification?" is a good observation. "PSNR is 20.7" is just a number.
 
 #### 2. HYPOTHESIZE — Explain *why*, not *what value*
 
@@ -145,7 +150,9 @@ After each investigation, write down:
 - **What evidence supports this?**
 - **What's the next question this raises?**
 
-Update `journal.md` with your findings. Update `results.tsv` with experiment data. Commit your best changes to the branch.
+Update `journal.md` with your findings. Update `results.tsv` with experiment data.
+
+**Git commits**: Commit when you have a **validated improvement** (higher PSNR you're keeping) or a **useful new capability** (e.g., a new densification method that works). Do NOT commit after every experiment — failed experiments and parameter sweeps live in the journal and results.tsv, not in the git history.
 
 ### End of shift — Discovery Report
 
