@@ -1,83 +1,82 @@
 # Discovery Journal
 
 ## Shift: 2026-03-21
-Goals: Understand VertexModel behavior, fix training instability, improve from untuned baseline.
+Goals: Understand VertexModel behavior, fix training instability, tune from untuned baseline.
 
-### Investigation 1: VertexModel baseline characterization
+### Investigation 1: Baseline + standard tuning
 
-**Question**: How does the untuned VertexModel perform?
+**Question**: How does the untuned VertexModel perform, and do standard knobs help?
 
-**Results**: 18.43 PSNR with 51k vertices, no densification, no retriangulation. ~1850 steps in 10 min (~0.31s/step). Per-image PSNR variance is extreme (0 to 20 in same epoch).
-
-### Investigation 2: Enabling densification and retriangulation
-
-**Question**: Do densification and Delaunay help the vertex model?
-
-| Config | PSNR | Verts | Notes |
-|---|---|---|---|
-| Baseline (no densify, no Delaunay) | 18.43 | 51k | Reference |
-| Densification 200/500/800 + Delaunay 300 | 18.93 | 137k | +0.5 barely helps |
-| Delaunay every 100 (no densify) | 18.45 | 51k | No effect |
-| No vertex position optimization | 18.16 | 51k | Slightly worse |
-
-**Discovery**: Neither densification nor retriangulation helps meaningfully. The vertex model's bottleneck is not vertex count or mesh quality.
-
-### Investigation 3: Parameter tuning
-
-| Change | PSNR | Notes |
+| Config | PSNR | Notes |
 |---|---|---|
-| n_quad_samples=2 (was 4) | 18.75 | ~7% faster, similar quality |
-| freeze_lr=2e-2 (was 6e-3) | 18.63 | Higher LR doesn't help |
-| density_offset=-2 (was -4) | 10.96 | Catastrophic — too opaque initial |
-| voxel_size=0 (more initial verts) | ~17.8 | COLMAP only has ~55k points anyway |
+| Baseline (exp density, no densify) | 18.43 | 51k verts, ~1850 steps in 10 min |
+| + densification 200/500/800 | 18.93 | 137k verts, barely helps |
+| + Delaunay every 100 | 18.45 | No effect |
+| n_quad_samples=2 | 18.75 | Slightly faster, similar quality |
+| freeze_lr=2e-2 | 18.63 | Higher LR doesn't help |
+| density_offset=-2 | 10.96 | Catastrophic |
+| No vertex opt | 18.16 | Slightly worse |
 
-**Discovery**: The vertex model is insensitive to these standard tuning knobs.
+**Discovery**: The vertex model is insensitive to standard tuning. Densification adds 85k vertices but barely improves quality. Something fundamental is wrong with convergence.
 
-### Investigation 4: Training instability deep dive (BREAKTHROUGH)
+### Investigation 2: Training instability diagnosis (BREAKTHROUGH)
 
-**Question**: Why does PSNR crash from 13.4 to -6 dB in the first 50 steps?
+**Question**: Why does PSNR crash from 13.4 to -6 dB at step 50?
 
-**Method**: Added per-step instrumentation logging sigma stats, density range, image value range, and alpha for the first 200 steps.
+**Method**: Per-step logging of sigma, density, image range, and alpha for first 200 steps.
 
-**Key finding**: The instability is caused by a **density-color convergence mismatch**.
+**Root cause**: **exp() density activation causes vanishing gradients**. With `density = exp(sigma - 4)`:
+- At sigma=0: gradient = exp(-4) = 0.018 — 50x weaker than color gradients
+- Color learns 100x faster than density, producing pixel values of 50+ through a nearly-transparent medium
+- This causes catastrophic per-image oscillations
 
-**Evidence** (with exp(sigma-4) activation, step-by-step):
-- Step 0: sigma=0, density=exp(-4)=0.018, alpha=0.17, img=[0.41-0.42] (uniform gray)
-- Step 3: sigma unchanged, density unchanged, img max=**24.4** (color exploding!)
-- Step 6: sigma unchanged, density unchanged, img max=**53.2**
-- Step 50: sigma max=0.2, density max=0.023, img max=9.3
-- Step 100: sigma max=0.6, density max=0.033, img still spiking to 9+
-- Step 200: sigma max still only 0.1 (at 1.5x LR), density max=0.028
+**Evidence**: At step 100, sigma max = 0.6, density max = 0.033, but image max still spiking to 9+. Even 10x sigma LR only reached density max = 0.111 at step 199.
 
-**Root cause**: The gradient through `exp(sigma + offset)` at offset=-4 is `exp(sigma-4) ≈ 0.018`. This is 50x smaller than the color gradient. Adam can't fix this because the gradient magnitude is genuinely tiny. Color learns 100x faster than density, so colors must be extreme (50x normal) to render anything visible through the nearly-transparent medium. This creates catastrophic oscillations.
+**Fix**: Pass raw `sigma + offset` to the shader instead of `exp(sigma + offset)`. The shader's existing `max(x, 0)` provides the nonlinearity with unit gradient for positive density.
 
-**Fix**: Replace `exp(sigma + offset)` with raw `sigma + offset` passed directly to the shader. The shader's existing `max(sigma_s, 0)` provides the nonlinearity. The gradient through `max` is 1 for positive density (vs 0.018 for exp), giving **50x stronger density gradients**.
-
-**Results**:
-
-| Density activation | PSNR | Convergence |
+| Density activation | PSNR | Early convergence |
 |---|---|---|
-| exp(sigma-4) baseline | 18.43 | PSNR=13.4 at step 0, crashes to -6, slow recovery |
-| **sigma+0 raw (max in shader)** | **19.42** | **PSNR=15.8 at step 0, no crash, fast convergence** |
-| Raw + densification | 19.55 | Barely helps (+0.13) despite 3.5x more vertices |
-| Raw + lambda_ssim=0.2 | 19.42 | No improvement |
+| exp(sigma-4) in Python | 18.43 | PSNR crashes to -6, slow recovery |
+| **sigma+0 raw (max in shader)** | **19.42** | No crash, fast convergence |
+| exp() in shader (log-space interp) | 18.24 | Same crash + Jensen's inequality loss |
 
-With 10x sigma LR: density grew faster (max=0.111 at step 199 vs 0.024 with 1.5x), confirming the gradient bottleneck hypothesis. But even 10x LR wasn't enough to fully fix it — the raw activation is fundamentally better.
+**Why exp-in-shader is worse**: Barycentric interpolation in log-space gives lower density at midpoints (Jensen's inequality: `exp(mean) <= mean(exp)`). This makes the mesh "leakier" and loses 0.2 dB vs the original Python-side exp.
 
-**Changes**: `get_vertex_values()` now returns `sigma + offset` instead of `exp(sigma + offset)`. `density_offset` changed from -4 to 0. `sigma` initialized to 0.01 (small positive) instead of 0. `n_quad_samples` changed from 4 to 2.
+### Investigation 3: Vertex optimization frequency
 
-### End-of-shift summary (in progress)
+**Question**: Does the optimal vertex opt frequency change with raw density?
 
-- **Best PSNR**: 19.42 (raw density, no densification, 51k vertices)
+| Frequency | PSNR |
+|---|---|
+| Every 5 steps | 19.42 |
+| Every 3 steps | 19.65 |
+| **Every 1 step** | **19.76** |
+
+**Discovery**: Every-step vertex optimization is best for the vertex model. Unlike the old per-tet model (where every-5 was optimal), the vertex model benefits from continuous position updates because positions directly define both geometry and the interpolation field.
+
+### Investigation 4: Delaunay with best config
+
+| Config | PSNR |
+|---|---|
+| No Delaunay | **19.76** |
+| Delaunay every 300 | 19.09 |
+
+**Discovery**: Delaunay retriangulation consistently hurts the vertex model. The retriangulation changes the tet topology, which disrupts the learned per-vertex attribute interpolation. Since the vertex model has no per-tet parameters, the index buffer swap should be harmless — but the changed tet shapes alter how vertex attributes interpolate, effectively perturbing the rendered output.
+
+### End-of-shift summary
+
+- **Best PSNR**: 19.76 (raw density + vertex opt every step, 51k vertices)
+- **Improvement**: +1.33 dB over untuned baseline (18.43)
 - **Key discoveries**:
-  1. **exp() density activation causes vanishing gradients** — the single biggest source of training instability
-  2. **Raw density with ReLU in shader fixes it** — +1 dB, eliminates color explosions
-  3. Densification barely helps the vertex model (+0.13 dB for 3.5x more vertices)
-  4. Delaunay retriangulation has no effect for vertex model
-  5. Quad samples 2 vs 4 is negligible quality difference
-- **Open questions**:
-  - Can we push past 19.5 with vertex model? Or is 51k vertices the real bottleneck?
-  - Would a different densification strategy help (current one designed for per-tet model)?
-  - Try vertex model with raw density on SimpleModel comparison
-  - Try different sigma initialization values
-  - Try disabling BW-SSIM loss (saves compute, may help or hurt)
+  1. **exp() density activation has vanishing gradients** at initialization — the dominant source of training instability
+  2. **Raw density with ReLU in shader** fixes convergence and gives +1.0 dB
+  3. **Every-step vertex optimization** gives +0.34 dB for vertex model (different optimum than per-tet model)
+  4. **Delaunay retriangulation hurts** the vertex model (-0.67 dB)
+  5. **Densification barely helps** (+0.13 dB for 3.5x more vertices) — the bottleneck is not vertex count
+  6. **Log-space interpolation (exp in shader) is worse** due to Jensen's inequality
+  7. Loss function tuning (SSIM, BW-SSIM) has negligible effect
+- **Open questions for next shift**:
+  - The 51k vertex model seems capacity-limited at ~19.8. Can per-vertex feature vectors increase capacity without more vertices?
+  - Try the raw density fix on the SimpleModel (per-tet) — does it help there too?
+  - Why does densification not help? Is the error-based selection bad, or is nearest-neighbor attribute initialization the problem?
+  - Explore higher SH degree or additional per-vertex learnable features
