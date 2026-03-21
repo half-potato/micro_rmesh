@@ -14,6 +14,7 @@ from utils.topo_utils import (
     fibonacci_spiral_on_sphere,
 )
 from utils.model_util import activate_output, pre_calc_cell_values, offset_normalize, RGB2SH
+from utils.eval_sh_py import eval_sh
 from utils.safe_math import safe_exp
 from utils import optim
 from utils.args import Args
@@ -400,6 +401,275 @@ def compute_transfer_weights_edge(
     return cands, weights, density_scale
 
 
+def compute_transfer_weights_bary(
+    new_indices: torch.Tensor,       # (T_new, 4) int
+    old_indices: torch.Tensor,       # (T_old, 4) int
+    old_cc: torch.Tensor,            # (T_old, 3)
+    new_cc: torch.Tensor,            # (T_new, 3)
+    vertex_positions: torch.Tensor,  # (V, 3)
+):
+    """For each new tet, compute blending weights across 5 candidate old tets
+    using barycentric walk + face-neighbor blending.
+
+    Steps:
+    1. Unchanged-tet detection (exact match → skip walk)
+    2. Build face adjacency + T_inv for old mesh
+    3. Barycentric walk for changed tets only, seeded from matched neighbors
+    4. Gather 5 candidates: containing tet + 4 face neighbors
+    5. Compute overlap/distance weights
+
+    Returns:
+        cands: (T_new, 5) long — candidate old tet indices
+        weights: (T_new, 5) float — normalized blending weights
+        density_scale: (T_new, 5) float — per-candidate edge-length ratio
+    """
+    import time
+    t0 = time.time()
+
+    device = new_indices.device
+    T_new = new_indices.shape[0]
+    T_old = old_indices.shape[0]
+    K = 5
+
+    # --- Step 1: Unchanged-tet detection (GPU, fast) ---
+    old_sorted = old_indices.long().sort(dim=1).values
+    new_sorted = new_indices.long().sort(dim=1).values
+    all_sorted = torch.cat([old_sorted, new_sorted], dim=0)
+    _, inverse = torch.unique(all_sorted, dim=0, sorted=True, return_inverse=True)
+
+    n_unique = inverse.max().item() + 1
+    unique_to_old = torch.full((n_unique,), -1, dtype=torch.long, device=device)
+    unique_to_old.scatter_(0, inverse[:T_old], torch.arange(T_old, device=device))
+
+    matched_old_tet = unique_to_old[inverse[T_old:]]
+    is_tet_matched = matched_old_tet >= 0
+    matched_old_tet_safe = matched_old_tet.clamp(min=0)
+    n_tet_matched = is_tet_matched.sum().item()
+
+    # Initialize remap: matched tets get their old index, others get 0 (placeholder)
+    remap = torch.where(is_tet_matched, matched_old_tet_safe,
+                        torch.zeros(T_new, dtype=torch.long, device=device))
+
+    # If all tets matched, skip walk entirely
+    n_changed = T_new - n_tet_matched
+    t_match = time.time() - t0
+
+    if n_changed > 0:
+        # --- Step 2: Build face adjacency + T_inv (CPU/numpy) ---
+        idx = old_indices.cpu().numpy().astype(np.int64)
+        V = vertex_positions.shape[0]
+
+        face_opp = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]]
+        face_keys = []
+        face_tets = []
+        face_locals = []
+        for f in range(4):
+            fi = np.sort(idx[:, face_opp[f]], axis=1)
+            keys = fi[:, 0].astype(np.int64) * V * V + fi[:, 1].astype(np.int64) * V + fi[:, 2].astype(np.int64)
+            face_keys.append(keys)
+            face_tets.append(np.arange(T_old))
+            face_locals.append(np.full(T_old, f))
+
+        all_keys = np.concatenate(face_keys)
+        all_tets_np = np.concatenate(face_tets)
+        all_locals = np.concatenate(face_locals)
+
+        order = np.argsort(all_keys)
+        sk = all_keys[order]
+        st = all_tets_np[order]
+        sl = all_locals[order]
+
+        neighbors = np.full((T_old, 4), -1, dtype=np.int64)
+        same = sk[:-1] == sk[1:]
+        for i in np.where(same)[0]:
+            t1, f1 = st[i], sl[i]
+            t2, f2 = st[i + 1], sl[i + 1]
+            neighbors[t1, f1] = t2
+            neighbors[t2, f2] = t1
+
+        verts_np = vertex_positions.detach().cpu().float().numpy()
+        v0 = verts_np[idx[:, 0]]
+        T_mat = np.stack([
+            verts_np[idx[:, 1]] - v0,
+            verts_np[idx[:, 2]] - v0,
+            verts_np[idx[:, 3]] - v0,
+        ], axis=-1)  # (T_old, 3, 3)
+
+        det = np.linalg.det(T_mat)
+        degenerate = np.abs(det) < 1e-10
+        T_mat_safe = T_mat.copy()
+        T_mat_safe[degenerate] = np.eye(3)
+        T_inv = np.linalg.inv(T_mat_safe)
+        neighbors[degenerate] = -1
+        old_v0 = v0
+
+        # --- Step 3: Walk only changed tets ---
+        changed_mask = ~is_tet_matched
+        changed_idx = torch.where(changed_mask)[0]  # indices into new tets
+        N_walk = changed_idx.shape[0]
+
+        new_idx_np = new_indices.cpu().numpy().astype(np.int64)
+        changed_idx_np = changed_idx.cpu().numpy()
+        walk_centroids = verts_np[new_idx_np[changed_idx_np]].mean(axis=1)  # (N_walk, 3)
+
+        # Seed initialization: for each changed tet, find the best starting tet
+        # via its vertices' presence in matched old tets (vertex→tet via old_indices)
+        # Simple fast seed: use vertex 0 of each changed new tet to look up
+        # any old tet containing that vertex via a quick v2t scatter
+        n_verts = vertex_positions.shape[0]
+        # Build simple v2t: last-write-wins (just need any tet per vertex)
+        v2t_simple = np.zeros(n_verts, dtype=np.int64)
+        for vi in range(4):
+            v2t_simple[idx[:, vi]] = np.arange(T_old)
+
+        # Seed from vertex 0 of each changed new tet
+        seed_verts = new_idx_np[changed_idx_np, 0]
+        current_tet = v2t_simple[seed_verts].copy()
+
+        walk_remap = current_tet.copy()
+        active = np.ones(N_walk, dtype=bool)
+        max_steps = 300
+        n_found = 0
+
+        for step_i in range(max_steps):
+            if not active.any():
+                break
+            act_idx = np.where(active)[0]
+            # Early out when very few remain (diminishing returns)
+            if len(act_idx) < max(100, N_walk // 1000):
+                break
+            ct = current_tet[act_idx]
+
+            rel = walk_centroids[act_idx] - old_v0[ct]
+            bary = np.einsum('nij,nj->ni', T_inv[ct], rel)
+            b0 = 1.0 - bary.sum(axis=1)
+            all_b = np.column_stack([b0, bary])
+
+            converged = all_b.min(axis=1) >= -1e-4
+            if converged.any():
+                conv_idx = act_idx[converged]
+                walk_remap[conv_idx] = current_tet[conv_idx]
+                active[conv_idx] = False
+                n_found += converged.sum()
+
+            still = act_idx[~converged]
+            if len(still) == 0:
+                break
+            worst_face = all_b[~converged].argmin(axis=1)
+            nb = neighbors[current_tet[still], worst_face]
+
+            at_boundary = nb < 0
+            if at_boundary.any():
+                boundary_idx = still[at_boundary]
+                walk_remap[boundary_idx] = current_tet[boundary_idx]
+                active[boundary_idx] = False
+
+            can_walk = still[~at_boundary]
+            current_tet[can_walk] = nb[~at_boundary]
+
+        # Handle remaining active queries
+        remaining_walk = np.where(active)[0]
+        if len(remaining_walk) > 0:
+            walk_remap[remaining_walk] = current_tet[remaining_walk]
+
+        # Fallback: nearest old centroid for unconverged queries (GPU)
+        n_bad = len(remaining_walk)
+        if n_bad > 0:
+            old_cents = vertex_positions[old_indices.long()].float().mean(dim=1)
+            bad_global = changed_idx_np[remaining_walk]
+            bad_cents = torch.as_tensor(walk_centroids[remaining_walk],
+                                        dtype=torch.float32, device=device)
+            chunk = 512
+            cc_chunk = 50_000
+            fallback_remap = np.empty(n_bad, dtype=np.int64)
+            for s in range(0, n_bad, chunk):
+                e = min(s + chunk, n_bad)
+                best_d = torch.full((e - s,), float("inf"), device=device)
+                best_i = torch.zeros(e - s, dtype=torch.long, device=device)
+                for cs in range(0, T_old, cc_chunk):
+                    ce = min(cs + cc_chunk, T_old)
+                    d = (bad_cents[s:e].unsqueeze(1) - old_cents[cs:ce].unsqueeze(0)).pow(2).sum(-1)
+                    min_d, min_i = d.min(dim=1)
+                    improved = min_d < best_d
+                    best_d[improved] = min_d[improved]
+                    best_i[improved] = min_i[improved] + cs
+                fallback_remap[s:e] = best_i.cpu().numpy()
+            walk_remap[remaining_walk] = fallback_remap
+
+        # Write walk results into remap
+        walk_remap_t = torch.as_tensor(walk_remap, dtype=torch.long, device=device).clamp(0, T_old - 1)
+        remap[changed_idx] = walk_remap_t
+    else:
+        n_found = 0
+        N_walk = 0
+        n_bad = 0
+        neighbors = np.full((T_old, 4), -1, dtype=np.int64)
+        # Still need face adjacency for candidate gathering
+        idx = old_indices.cpu().numpy().astype(np.int64)
+        V = vertex_positions.shape[0]
+        face_opp = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]]
+        face_keys = []
+        face_tets = []
+        face_locals = []
+        for f in range(4):
+            fi = np.sort(idx[:, face_opp[f]], axis=1)
+            keys = fi[:, 0].astype(np.int64) * V * V + fi[:, 1].astype(np.int64) * V + fi[:, 2].astype(np.int64)
+            face_keys.append(keys)
+            face_tets.append(np.arange(T_old))
+            face_locals.append(np.full(T_old, f))
+        all_keys = np.concatenate(face_keys)
+        all_tets_np = np.concatenate(face_tets)
+        all_locals = np.concatenate(face_locals)
+        order = np.argsort(all_keys)
+        sk = all_keys[order]
+        st = all_tets_np[order]
+        sl = all_locals[order]
+        same = sk[:-1] == sk[1:]
+        for i in np.where(same)[0]:
+            t1, f1 = st[i], sl[i]
+            t2, f2 = st[i + 1], sl[i + 1]
+            neighbors[t1, f1] = t2
+            neighbors[t2, f2] = t1
+
+    t_walk = time.time() - t0
+
+    # --- Step 4: Gather 5 candidates (containing tet + 4 face neighbors) ---
+    neighbors_t = torch.as_tensor(neighbors, dtype=torch.long, device=device)
+    face_nb = neighbors_t[remap]  # (T_new, 4)
+    face_nb = torch.where(face_nb >= 0, face_nb, remap.unsqueeze(1).expand(-1, 4))
+    cands = torch.cat([remap.unsqueeze(1), face_nb], dim=1)  # (T_new, 5)
+
+    # For unchanged tets: all 5 candidates = matched old tet
+    if n_tet_matched > 0:
+        cands[is_tet_matched] = matched_old_tet_safe[is_tet_matched].unsqueeze(1).expand(-1, K)
+
+    # --- Step 5: Compute overlap/distance weights ---
+    cand_verts = old_indices[cands].long()                    # (T_new, 5, 4)
+    new_verts = new_indices.long().unsqueeze(1)               # (T_new, 1, 4)
+    matches = (cand_verts.unsqueeze(-1) == new_verts.unsqueeze(2))
+    overlap = matches.any(dim=-1).sum(dim=-1).float()         # (T_new, 5)
+
+    cand_cc = old_cc[cands]
+    cc_dist_sq = (cand_cc - new_cc.unsqueeze(1)).pow(2).sum(-1)
+
+    overlap_weight = torch.exp(overlap * 2.0)
+    dist_weight = 1.0 / (cc_dist_sq + 1e-8)
+    raw_weights = overlap_weight * dist_weight
+    weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)
+
+    # --- Step 6: Compute density_scale ---
+    old_el_all = _min_edge_length(vertex_positions, old_indices)
+    new_el = _min_edge_length(vertex_positions, new_indices)
+    old_el = old_el_all[cands]
+    density_scale = (old_el / new_el.unsqueeze(1).clamp(min=1e-8)).clamp(min=0.1, max=10.0)
+
+    t_total = time.time() - t0
+    print(f"  Bary transfer: {n_found}/{N_walk} walked ({n_tet_matched} unchanged), "
+          f"fallback {n_bad}, match {t_match:.2f}s walk {t_walk:.2f}s total {t_total:.2f}s")
+
+    return cands, weights, density_scale
+
+
 # ===========================================================================
 # SimpleModel
 # ===========================================================================
@@ -563,6 +833,178 @@ class SimpleModel(torch.nn.Module):
         return densities.reshape(-1)
 
     @torch.no_grad()
+    def update_triangulation_bary(self):
+        """Recompute Delaunay + transfer parameters via barycentric walk.
+
+        Builds face adjacency from our gdel3d mesh, then uses barycentric
+        walks to locate each new tet's centroid in the old mesh.
+
+        Returns (remap, new_indices) where remap[i] = old tet index for new tet i.
+        """
+        old_indices = self.indices.clone()
+        verts = self.vertices
+        T_old = old_indices.shape[0]
+        device = old_indices.device
+
+        # --- Build face adjacency for old mesh ---
+        idx = old_indices.cpu().numpy().astype(np.int64)
+        V = verts.shape[0]
+        # 4 faces per tet, each face = sorted triple of vertices (opposite one vertex)
+        # Face f of tet t is opposite vertex f
+        face_opp = [[1,2,3], [0,2,3], [0,1,3], [0,1,2]]
+        face_keys = []
+        face_tets = []
+        face_locals = []
+        for f in range(4):
+            fi = np.sort(idx[:, face_opp[f]], axis=1)  # (T, 3) sorted
+            keys = fi[:, 0] * V * V + fi[:, 1] * V + fi[:, 2]
+            face_keys.append(keys)
+            face_tets.append(np.arange(T_old))
+            face_locals.append(np.full(T_old, f))
+
+        all_keys = np.concatenate(face_keys)      # (4*T,)
+        all_tets = np.concatenate(face_tets)       # (4*T,)
+        all_locals = np.concatenate(face_locals)   # (4*T,)
+
+        # Sort by key to group faces
+        order = np.argsort(all_keys)
+        sk = all_keys[order]
+        st = all_tets[order]
+        sl = all_locals[order]
+
+        # Build neighbor array: neighbor[t, f] = tet across face f, or -1
+        neighbors = np.full((T_old, 4), -1, dtype=np.int64)
+        # Consecutive pairs with same key are neighbors
+        same = sk[:-1] == sk[1:]
+        for i in np.where(same)[0]:
+            t1, f1 = st[i], sl[i]
+            t2, f2 = st[i+1], sl[i+1]
+            neighbors[t1, f1] = t2
+            neighbors[t2, f2] = t1
+
+        # --- New Delaunay triangulation (gdel3d) ---
+        v = Del(verts.shape[0])
+        indices_np, prev = v.compute(verts.detach().cpu().double())
+        valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
+        indices_np = indices_np[valid_mask.all(axis=1)]
+        del prev
+
+        new_indices = torch.as_tensor(indices_np).cuda()
+        vols = tet_volumes(verts[new_indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            new_indices[reverse_mask] = new_indices[reverse_mask][:, [1, 0, 2, 3]]
+
+        T_new = new_indices.shape[0]
+
+        # --- Vectorized barycentric walk to locate new centroids in old mesh ---
+        verts_np = verts.detach().cpu().float().numpy()
+        new_centroids = verts_np[new_indices.cpu().numpy().astype(np.int64)].mean(axis=1)  # (T_new, 3)
+
+        # Precompute inverse transform for barycentric coords of all old tets
+        v0 = verts_np[idx[:, 0]]  # (T_old, 3)
+        T_mat = np.stack([
+            verts_np[idx[:, 1]] - v0,
+            verts_np[idx[:, 2]] - v0,
+            verts_np[idx[:, 3]] - v0,
+        ], axis=-1)  # (T_old, 3, 3)
+        # Handle degenerate tets: use pseudo-inverse and mark bad tets
+        det = np.linalg.det(T_mat)
+        degenerate = np.abs(det) < 1e-10
+        # Replace degenerate matrices with identity to avoid NaN in inv
+        T_mat_safe = T_mat.copy()
+        T_mat_safe[degenerate] = np.eye(3)
+        T_inv = np.linalg.inv(T_mat_safe)  # (T_old, 3, 3)
+        # Mark degenerate tets so walk avoids them
+        neighbors[degenerate] = -1  # degenerate tets have no valid neighbors
+        old_v0 = v0
+        n_degenerate = degenerate.sum()
+        if n_degenerate > 0:
+            print(f"  {n_degenerate} degenerate tets excluded from walk")
+
+        # Initialize: each query starts at a tet (use index % T_old for spread)
+        current_tet = np.arange(T_new, dtype=np.int64) % T_old
+        remap = current_tet.copy()
+        active = np.ones(T_new, dtype=bool)
+        max_steps = 500
+        n_found = 0
+
+        for step_i in range(max_steps):
+            if not active.any():
+                break
+            act_idx = np.where(active)[0]
+            ct = current_tet[act_idx]
+
+            # Compute bary coords: T_inv[ct] @ (p - v0[ct])
+            rel = new_centroids[act_idx] - old_v0[ct]  # (N_active, 3)
+            # Batched matrix-vector multiply: (N, 3, 3) @ (N, 3) → (N, 3)
+            bary = np.einsum('nij,nj->ni', T_inv[ct], rel)  # (N_active, 3)
+            b0 = 1.0 - bary.sum(axis=1)  # (N_active,)
+
+            # Check convergence: all bary coords >= -eps
+            all_b = np.column_stack([b0, bary])  # (N_active, 4)
+            converged = all_b.min(axis=1) >= -1e-4
+            if converged.any():
+                conv_idx = act_idx[converged]
+                remap[conv_idx] = current_tet[conv_idx]
+                active[conv_idx] = False
+                n_found += converged.sum()
+
+            # Walk unconverged queries toward most negative bary coord
+            still = act_idx[~converged]
+            if len(still) == 0:
+                break
+            worst_face = all_b[~converged].argmin(axis=1)  # (N_still,)
+            nb = neighbors[current_tet[still], worst_face]  # (N_still,)
+            # If neighbor is -1 (boundary), stop walking
+            at_boundary = nb < 0
+            if at_boundary.any():
+                boundary_idx = still[at_boundary]
+                remap[boundary_idx] = current_tet[boundary_idx]
+                active[boundary_idx] = False
+            # Update current tet for those that can walk
+            can_walk = still[~at_boundary]
+            current_tet[can_walk] = nb[~at_boundary]
+
+        # Handle any remaining active queries (didn't converge) — use last visited
+        remaining = np.where(active)[0]
+        if len(remaining) > 0:
+            remap[remaining] = current_tet[remaining]
+
+        n_outside = T_new - n_found
+
+        # For unfound queries, improve remap via nearest old centroid (GPU)
+        unfound_idx = np.where(~np.isin(np.arange(T_new), np.where(~active)[0] if n_found > 0 else np.array([])))[0]
+        # Actually: unfound = queries that didn't converge OR hit boundary
+        not_converged = np.where(active)[0]  # still active = didn't converge
+        # For boundary hits + unconverged, do nearest centroid search on GPU
+        n_bad = len(remaining)
+        if n_bad > 0:
+            remap_t_temp = torch.as_tensor(remap, dtype=torch.long, device=device)
+            new_cents = verts[new_indices.long()].float().mean(dim=1)  # (T_new, 3)
+            old_cents = verts[old_indices.long()].float().mean(dim=1)  # (T_old, 3)
+            bad_idx_t = torch.as_tensor(remaining, dtype=torch.long, device=device)
+            bad_cents = new_cents[bad_idx_t]  # (n_bad, 3)
+            # Chunked nearest search on GPU
+            chunk = 2048
+            for s in range(0, n_bad, chunk):
+                e = min(s + chunk, n_bad)
+                d = (bad_cents[s:e].unsqueeze(1) - old_cents.unsqueeze(0)).pow(2).sum(-1)
+                remap[remaining[s:e]] = d.argmin(dim=1).cpu().numpy()
+        remap_t = torch.as_tensor(remap, dtype=torch.long, device=device)
+
+        print(f"  Bary transfer: {n_found}/{T_new} located via walk, {n_outside} not found")
+
+        # DEBUG: check for NaN in remap result
+        remap_t = torch.as_tensor(remap, dtype=torch.long, device=device)
+        bad = (remap_t < 0) | (remap_t >= T_old)
+        if bad.any():
+            print(f"  WARNING: {bad.sum()} out-of-bounds remap indices! Clamping.")
+            remap_t = remap_t.clamp(0, T_old - 1)
+
+        return remap_t, new_indices
+
+    @torch.no_grad()
     def update_triangulation(
         self,
         high_precision=False,
@@ -575,25 +1017,17 @@ class SimpleModel(torch.nn.Module):
 
         Returns:
             (cands, weights, density_scale, new_indices, new_cc, old_cc,
-             old_indices, old_tet_edge_idx, new_tet_edge_idx,
-             old_unique_keys, new_unique_keys) or None
+             old_indices) or None
         """
         torch.cuda.empty_cache()
 
         old_indices = self.indices.clone()
         verts = self.vertices
-        n_verts = verts.shape[0]
 
         old_cc, _ = calculate_circumcenters_torch(
             verts[old_indices.long()].double()
         )
         old_cc = old_cc.float()
-
-        # Build v2t adjacency on old mesh
-        v2t, _ = build_v2t(old_indices, n_verts)
-
-        # Build edge keys on old mesh (for edge-local conservation later)
-        old_unique_keys, old_tet_edge_idx = _edge_keys_and_indices(old_indices, n_verts)
 
         # Retriangulate
         if high_precision:
@@ -617,18 +1051,13 @@ class SimpleModel(torch.nn.Module):
         new_cc, _ = calculate_circumcenters_torch(verts[new_indices.long()].double())
         new_cc = new_cc.float()
 
-        # Build edge keys on new mesh
-        new_unique_keys, new_tet_edge_idx = _edge_keys_and_indices(new_indices, n_verts)
-
-        # Compute transfer weights across 6 candidates per new tet (edge-based)
-        cands, weights, density_scale = compute_transfer_weights_edge(
-            v2t, new_indices, old_indices, old_cc, new_cc, verts, n_verts,
-            old_unique_keys=old_unique_keys, old_tet_edge_idx=old_tet_edge_idx)
+        # Compute transfer weights via barycentric walk + neighbor blending
+        cands, weights, density_scale = compute_transfer_weights_bary(
+            new_indices, old_indices, old_cc, new_cc, verts)
 
         torch.cuda.empty_cache()
         return (cands, weights, density_scale, new_indices, new_cc, old_cc,
-                old_indices, old_tet_edge_idx, new_tet_edge_idx,
-                old_unique_keys, new_unique_keys)
+                old_indices)
 
     @torch.no_grad()
     def fast_retriangulate(self):
@@ -1048,6 +1477,80 @@ class SimpleOptimizer:
                 'exp_avg_sq': new_exp_avg_sq,
             }
 
+    # --- barycentric walk transfer (no blending, direct copy) ---
+    def bary_update_triangulation(self, density_threshold=0.0, alpha_threshold=0.0, **kwargs):
+        """Retriangulate + transfer via barycentric walk. Direct 1:1 copy, no blending."""
+        # Save Adam state before transfer
+        old_optim_state = self._save_adam_state(self.optim)
+        old_sh_state = self._save_adam_state(self.sh_optim)
+
+        result = self.model.update_triangulation_bary()
+        if result is None:
+            return
+        remap, new_indices = result
+        old_indices = self.model.indices
+
+        # Copy parameters with density_scale correction for sigma
+        old_el = _min_edge_length(self.model.vertices, old_indices)   # (T_old,)
+        new_el = _min_edge_length(self.model.vertices, new_indices)   # (T_new,)
+        density_scale = (old_el[remap] / new_el.clamp(min=1e-8)).clamp(min=0.1, max=10.0)
+        log_ds = torch.log(density_scale).unsqueeze(-1)  # (T_new, 1)
+
+        new_sigma = self.model.density.data[remap] + log_ds
+        if torch.isnan(new_sigma).any():
+            print(f"  WARNING: NaN in new_sigma! density NaN: {torch.isnan(self.model.density.data[remap]).any()}, log_ds NaN: {torch.isnan(log_ds).any()}")
+        if torch.isnan(self.model.rgb.data[remap]).any():
+            print(f"  WARNING: NaN in remapped rgb!")
+        self.model.density = nn.Parameter(new_sigma.contiguous().requires_grad_(True))
+        self.model.rgb = nn.Parameter(self.model.rgb.data[remap].contiguous().requires_grad_(True))
+        self.model.gradient = nn.Parameter(self.model.gradient.data[remap].contiguous().requires_grad_(True))
+        self.model.sh = nn.Parameter(self.model.sh.data[remap].contiguous().requires_grad_(True))
+        self.model.indices = new_indices.int()
+
+        # Cull low-density tets
+        cull_mask = None
+        if density_threshold > 0 or alpha_threshold > 0:
+            tet_density = self.model.calc_tet_density()
+            cull_mask = tet_density > density_threshold
+            self.model.empty_indices = self.model.indices[~cull_mask]
+            self.model.indices = self.model.indices[cull_mask]
+            self.model.density = nn.Parameter(self.model.density.data[cull_mask].contiguous().requires_grad_(True))
+            self.model.rgb = nn.Parameter(self.model.rgb.data[cull_mask].contiguous().requires_grad_(True))
+            self.model.gradient = nn.Parameter(self.model.gradient.data[cull_mask].contiguous().requires_grad_(True))
+            self.model.sh = nn.Parameter(self.model.sh.data[cull_mask].contiguous().requires_grad_(True))
+        else:
+            self.model.empty_indices = torch.empty((0, 4), dtype=self.model.indices.dtype, device="cuda")
+
+        # Rebuild optimizers properly then restore remapped Adam state
+        self._rebuild_optim()
+
+        # Remap Adam state: index old state by remap (+ optional cull)
+        def restore_remapped(custom_adam, saved, remap_idx, cull=None):
+            for group in custom_adam.param_groups:
+                name = group['name']
+                if name not in saved:
+                    continue
+                param = group['params'][0]
+                old = saved[name]
+                new_ea = old['exp_avg'][remap_idx]
+                new_ea_sq = old['exp_avg_sq'][remap_idx]
+                if cull is not None:
+                    new_ea = new_ea[cull]
+                    new_ea_sq = new_ea_sq[cull]
+                custom_adam.optimizer.state[param] = {
+                    'step': old['step'].clone(),
+                    'exp_avg': new_ea,
+                    'exp_avg_sq': new_ea_sq,
+                }
+
+        if old_optim_state:
+            restore_remapped(self.optim, old_optim_state, remap, cull_mask)
+        if old_sh_state:
+            restore_remapped(self.sh_optim, old_sh_state, remap, cull_mask)
+
+        self.model.device = self.model.density.device
+        torch.cuda.empty_cache()
+
     # --- fast retriangulation (direct copy, no blending) ---
     def fast_update_triangulation(self):
         """Fast path: direct tet-to-tet copy with no blending or optimizer rebuild.
@@ -1122,13 +1625,12 @@ class SimpleOptimizer:
         if result is None:
             return
         (cands, weights, density_scale, new_indices, new_cc, old_cc,
-         old_indices, old_tet_edge_idx, new_tet_edge_idx,
-         old_unique_keys, new_unique_keys) = result
+         old_indices) = result
 
-        # Weighted blend of parameter values across 6 candidates
+        # Weighted blend of parameter values across 5 candidates
         # density stores sigma (log-space); blend sigma + additive edge-length correction
         old_sigma = self.model.density.data  # (T_old, 1) — sigma values
-        log_density_scale = torch.log(density_scale.unsqueeze(-1).clamp(min=1e-8))  # (T_new, 6, 1)
+        log_density_scale = torch.log(density_scale.unsqueeze(-1).clamp(min=1e-8))  # (T_new, 5, 1)
         scaled_sigma = old_sigma[cands] + log_density_scale
         w = weights.unsqueeze(-1)
         new_sigma = (scaled_sigma * w).sum(dim=1)
@@ -1430,4 +1932,390 @@ class SimpleOptimizer:
         torch.nn.utils.clip_grad_norm_(self.model.density, max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.gradient, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.sh, max_norm)
+
+
+# ===========================================================================
+# VertexModel — per-vertex attributes with 2-sample quadrature
+# ===========================================================================
+
+class VertexModel(torch.nn.Module):
+    """Per-vertex parameter model. Retriangulation just swaps the index buffer."""
+
+    def __init__(
+        self,
+        int_vertices: torch.Tensor,
+        ext_vertices: torch.Tensor,
+        indices: torch.Tensor,
+        sigma: torch.Tensor,
+        rgb: torch.Tensor,
+        sh: torch.Tensor,
+        center: torch.Tensor,
+        scene_scaling: torch.Tensor | float,
+        *,
+        max_sh_deg: int = 2,
+        density_offset: float = -3,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+
+        # Geometry
+        self.interior_vertices = nn.Parameter(int_vertices.cuda(), requires_grad=True)
+        self.register_buffer("ext_vertices", ext_vertices.cuda())
+        self.register_buffer("indices", indices.int())
+        self.empty_indices = torch.empty((0, 4), dtype=indices.dtype, device='cuda')
+        self.register_buffer("center", center.reshape(1, 3))
+        self.register_buffer("scene_scaling", torch.as_tensor(scene_scaling))
+
+        # Per-vertex learnable parameters
+        self.sigma = nn.Parameter(sigma, requires_grad=True)       # (V, 1) log-density
+        self.rgb = nn.Parameter(rgb, requires_grad=True)           # (V, 3) DC color
+        self.sh = nn.Parameter(sh.half(), requires_grad=True)      # (V, sh_dim//3, 3)
+
+        # Config
+        self.max_sh_deg = max_sh_deg
+        self.current_sh_deg = max_sh_deg
+        self.device = self.sigma.device
+        self.sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
+        self.density_offset = density_offset
+        self.register_buffer("_density_offset", torch.tensor(density_offset))
+
+        self.mask_values = False
+        self.feature_dim = 4   # sigma + rgb
+        self.additional_attr = 0
+
+    def sh_up(self):
+        self.current_sh_deg = min(self.max_sh_deg, self.current_sh_deg + 1)
+
+    @property
+    def vertices(self) -> torch.Tensor:
+        return torch.cat([self.interior_vertices, self.ext_vertices], dim=0)
+
+    def __len__(self):
+        return self.interior_vertices.shape[0] + self.ext_vertices.shape[0]
+
+    @property
+    def num_int_verts(self):
+        return self.interior_vertices.shape[0]
+
+    def get_vertex_values(self, camera) -> torch.Tensor:
+        """Compute per-vertex (sigma, r, g, b) tensor of shape (V, 4)."""
+        density = safe_exp(self.sigma + self._density_offset)  # (V, 1)
+
+        sh_dim = (self.max_sh_deg + 1) ** 2 - 1
+        if sh_dim == 0:
+            sh_rest = torch.empty((self.sigma.shape[0], 0, 3), device=self.device, dtype=self.sh.dtype)
+        else:
+            sh_rest = self.sh.reshape(-1, sh_dim, 3)
+
+        color_raw = eval_sh(
+            self.vertices,
+            RGB2SH(self.rgb),
+            sh_rest,
+            camera.camera_center.to(self.device),
+            self.current_sh_deg).float()
+        color = torch.nn.functional.softplus(color_raw.reshape(-1, 3), beta=10)
+
+        return torch.cat([density, color], dim=-1).float()  # (V, 4)
+
+    def calc_tet_density(self):
+        """Average vertex density per tet (for culling)."""
+        density = safe_exp(self.sigma + self._density_offset).reshape(-1)
+        tet_verts = self.indices.long()  # (T, 4)
+        return density[tet_verts].mean(dim=1)
+
+    @torch.no_grad()
+    def update_triangulation(self, **kwargs):
+        """Recompute Delaunay — just swap index buffer."""
+        verts = self.vertices
+        v = Del(verts.shape[0])
+        indices_np, prev = v.compute(verts.detach().cpu().double())
+        valid_mask = (indices_np >= 0) & (indices_np < verts.shape[0])
+        indices_np = indices_np[valid_mask.all(axis=1)]
+        del prev
+
+        new_indices = torch.as_tensor(indices_np).cuda()
+        vols = tet_volumes(verts[new_indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            new_indices[reverse_mask] = new_indices[reverse_mask][:, [1, 0, 2, 3]]
+
+        self.indices = new_indices.int()
+        self.empty_indices = torch.empty((0, 4), dtype=self.indices.dtype, device="cuda")
+
+    @staticmethod
+    def init_from_pcd(
+        point_cloud,
+        cameras,
+        device,
+        max_sh_deg=2,
+        voxel_size=0.00,
+        density_offset=-3,
+        **kwargs,
+    ):
+        torch.manual_seed(2)
+
+        ccenters = torch.stack(
+            [c.camera_center.reshape(3) for c in cameras], dim=0
+        ).to(device)
+        center = ccenters.mean(dim=0)
+        scaling = torch.linalg.norm(
+            ccenters - center.reshape(1, 3), dim=1, ord=torch.inf
+        ).max()
+        print(f"Scene scaling: {scaling}. Center: {center}")
+
+        vertices = torch.as_tensor(point_cloud.points).float()
+
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(vertices.numpy())
+        if voxel_size > 0:
+            o3d_pcd = o3d_pcd.voxel_down_sample(voxel_size=voxel_size)
+
+        vertices = torch.as_tensor(np.asarray(o3d_pcd.points)).float()
+        vertices = vertices + torch.randn(*vertices.shape) * 1e-3
+
+        pcd_scaling = torch.linalg.norm(
+            vertices - center.cpu().reshape(1, 3), dim=1, ord=2
+        ).max()
+        new_radius = pcd_scaling.cpu().item()
+
+        num_ext = 1000
+        ext_vertices = (
+            fibonacci_spiral_on_sphere(num_ext, new_radius, device="cpu")
+            + center.reshape(1, 3).cpu()
+        )
+
+        # Concatenate exterior into interior (same as SimpleModel)
+        vertices = torch.cat([vertices, ext_vertices], dim=0)
+        ext_vertices = torch.empty((0, 3))
+
+        int_vertices = vertices.to(device)
+        ext_verts = ext_vertices.to(device)
+
+        # Initial Delaunay
+        all_verts = torch.cat([int_vertices, ext_verts], dim=0)
+        v = Del(all_verts.shape[0])
+        indices_np, prev = v.compute(all_verts.detach().cpu().double())
+        valid_mask = (indices_np >= 0) & (indices_np < all_verts.shape[0])
+        indices_np = indices_np[valid_mask.all(axis=1)]
+        del prev
+        indices = torch.as_tensor(indices_np).to(device)
+        vols = tet_volumes(all_verts[indices])
+        reverse_mask = vols < 0
+        if reverse_mask.sum() > 0:
+            indices[reverse_mask] = indices[reverse_mask][:, [1, 0, 2, 3]]
+
+        V = all_verts.shape[0]
+        sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
+
+        # Per-vertex parameters
+        sigma = torch.zeros((V, 1), device=device)
+        rgb = torch.full((V, 3), 0.5, device=device)
+        sh = torch.zeros((V, sh_dim // 3, 3), device=device)
+
+        model = VertexModel(
+            int_vertices=int_vertices,
+            ext_vertices=ext_verts,
+            indices=indices,
+            sigma=sigma,
+            rgb=rgb,
+            sh=sh,
+            center=center,
+            scene_scaling=scaling,
+            max_sh_deg=max_sh_deg,
+            density_offset=density_offset,
+        )
+        return model
+
+    @staticmethod
+    def load_ckpt(path: Path, device):
+        ckpt_path = path / "ckpt.pth"
+        config_path = path / "config.json"
+        config = Args.load_from_json(str(config_path))
+        ckpt = torch.load(ckpt_path)
+
+        model = VertexModel(
+            int_vertices=ckpt["interior_vertices"].to(device),
+            ext_vertices=ckpt["ext_vertices"].to(device),
+            indices=ckpt["indices"].to(device),
+            sigma=ckpt["sigma"].to(device),
+            rgb=ckpt["rgb"].to(device),
+            sh=ckpt["sh"].to(device),
+            center=ckpt["center"].to(device),
+            scene_scaling=ckpt["scene_scaling"].to(device),
+            max_sh_deg=config.max_sh_deg,
+        )
+        model.load_state_dict(ckpt)
+        model.min_t = config.min_t
+        return model
+
+
+# ===========================================================================
+# VertexOptimizer
+# ===========================================================================
+
+class VertexOptimizer:
+    """Optimizer for VertexModel. Retriangulation is trivial (no state remap)."""
+
+    def __init__(
+        self,
+        model: VertexModel,
+        *,
+        freeze_lr: float = 1e-3,
+        final_freeze_lr: float = 1e-4,
+        lr_delay_multi=1e-8,
+        lr_delay=0,
+        vertices_lr: float = 4e-4,
+        final_vertices_lr: float = 4e-7,
+        vert_lr_delay: int = 500,
+        vertices_lr_delay_multi: float = 0.01,
+        iterations: int = 30000,
+        **kwargs,
+    ) -> None:
+        self.model = model
+
+        self.optim = optim.CustomAdam([
+            {"params": [model.sigma], "lr": freeze_lr * 1.5, "name": "sigma"},
+            {"params": [model.rgb], "lr": freeze_lr, "name": "color"},
+        ], eps=1e-15)
+        self.sh_optim = optim.CustomAdam([
+            {"params": [model.sh], "lr": freeze_lr, "name": "sh"},
+        ], eps=1e-7)  # half-precision safe eps
+        self.vert_lr_multi = float(model.scene_scaling.cpu())
+        self.vertex_optim = optim.CustomAdam([
+            {
+                "params": [model.interior_vertices],
+                "lr": self.vert_lr_multi * vertices_lr,
+                "name": "interior_vertices",
+            },
+        ])
+
+        self.scheduler = get_expon_lr_func(
+            lr_init=freeze_lr,
+            lr_final=final_freeze_lr,
+            lr_delay_mult=lr_delay_multi,
+            max_steps=iterations,
+            lr_delay_steps=lr_delay,
+        )
+
+        self.vertex_lr = self.vert_lr_multi * vertices_lr
+        self.vertex_scheduler_args = get_expon_lr_func(
+            lr_init=self.vertex_lr,
+            lr_final=self.vert_lr_multi * final_vertices_lr,
+            lr_delay_mult=vertices_lr_delay_multi,
+            max_steps=iterations,
+            lr_delay_steps=vert_lr_delay,
+        )
+
+        self.net_optim = self.optim
+
+    def step(self):
+        self.optim.step()
+
+    def zero_grad(self):
+        self.optim.zero_grad()
+
+    def main_step(self):
+        self.step()
+
+    def main_zero_grad(self):
+        self.zero_grad()
+
+    def update_learning_rate(self, iteration):
+        for param_group in self.optim.param_groups:
+            lr = self.scheduler(iteration)
+            param_group["lr"] = lr
+
+        for param_group in self.sh_optim.param_groups:
+            lr = self.scheduler(iteration)
+            param_group["lr"] = lr
+
+        for param_group in self.vertex_optim.param_groups:
+            if param_group["name"] == "interior_vertices":
+                lr = self.vertex_scheduler_args(iteration)
+                self.vertex_lr = lr
+                param_group["lr"] = lr
+
+    def regularizer(self, render_pkg, **kwargs):
+        return 0.0
+
+    @torch.no_grad()
+    def update_triangulation(self, **kwargs):
+        """Retriangulate — just swap indices, no parameter transfer needed."""
+        self.model.update_triangulation(**kwargs)
+
+    def _rebuild_attr_optim(self):
+        """Rebuild per-vertex attribute optimizers preserving LR."""
+        lr_sigma = self.optim.param_groups[0]["lr"]
+        lr_color = self.optim.param_groups[1]["lr"] if len(self.optim.param_groups) > 1 else lr_sigma
+        sh_lr = self.sh_optim.param_groups[0]["lr"]
+
+        self.optim = optim.CustomAdam([
+            {"params": [self.model.sigma], "lr": lr_sigma, "name": "sigma"},
+            {"params": [self.model.rgb], "lr": lr_color, "name": "color"},
+        ], eps=1e-15)
+        self.sh_optim = optim.CustomAdam([
+            {"params": [self.model.sh], "lr": sh_lr, "name": "sh"},
+        ], eps=1e-7)  # half-precision safe eps
+        self.net_optim = self.optim
+
+    @torch.no_grad()
+    def add_vertices(self, new_positions: torch.Tensor):
+        """Add new vertices, init attributes from nearest existing vertex."""
+        model = self.model
+        V_old = model.vertices.shape[0]
+
+        # Find nearest existing vertex for each new position
+        # Chunked to avoid OOM
+        n_new = new_positions.shape[0]
+        nearest = torch.zeros(n_new, dtype=torch.long, device=model.device)
+        old_verts = model.vertices.detach()
+        chunk = 2048
+        for s in range(0, n_new, chunk):
+            e = min(s + chunk, n_new)
+            d = (new_positions[s:e].unsqueeze(1) - old_verts.unsqueeze(0)).pow(2).sum(-1)
+            nearest[s:e] = d.argmin(dim=1)
+
+        new_sigma = model.sigma.data[nearest]
+        new_rgb = model.rgb.data[nearest]
+        new_sh = model.sh.data[nearest]
+
+        # Extend interior_vertices via optimizer (preserves Adam state)
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=new_positions)
+        )["interior_vertices"]
+
+        # Extend per-vertex params
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+        print(f"Added {n_new} vertices (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+
+    @torch.no_grad()
+    def split_tets_inplace(self, split_mask):
+        """Densification: add vertices at centroids of selected tets."""
+        model = self.model
+        split_idx = torch.where(split_mask)[0]
+        K = split_idx.shape[0]
+        if K == 0:
+            return
+
+        # Compute centroids of tets to split
+        split_tet_verts = model.indices[split_idx].long()  # (K, 4)
+        verts = model.vertices
+        centroids = verts[split_tet_verts].float().mean(dim=1)  # (K, 3)
+
+        self.add_vertices(centroids)
+
+    def clip_grad_norm_(self, max_norm):
+        torch.nn.utils.clip_grad_norm_(self.model.sigma, max_norm)
+        torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.sh, max_norm)

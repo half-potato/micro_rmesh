@@ -14,7 +14,7 @@ import random
 from data import loader
 import numpy as np
 from utils.train_util import render, SimpleSampler
-from model import SimpleModel as Model, SimpleOptimizer as TetOptimizer
+from model import VertexModel as Model, VertexOptimizer as TetOptimizer
 from fused_ssim import fused_ssim
 from pathlib import Path, PosixPath
 from utils.args import Args
@@ -54,10 +54,11 @@ args.max_sh_deg = 1
 args.sh_interval = 0
 args.sh_step = 1
 
-# SimpleModel uses freeze_lr/final_freeze_lr for per-tet param LR
-args.freeze_lr = 3e-2
-args.final_freeze_lr = 3e-3
+# Per-vertex LR: ~1/5 of per-tet LR to compensate for gradient accumulation
+args.freeze_lr = 6e-3
+args.final_freeze_lr = 6e-4
 args.additional_attr = 0
+args.n_quad_samples = 4
 args.density_offset = -4
 
 # Vertex Settings
@@ -153,8 +154,8 @@ step = 0
 while True:
     torch.cuda.synchronize()
     t0 = time.time()
-    do_delaunay = step % args.delaunay_interval == 0
-    do_cloning = step in dschedule and total_training_time < test_util.DENSIFICATION_TIME_BUDGET
+    do_delaunay = False  # disabled for vertex model testing
+    do_cloning = False   # disabled for vertex model testing
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
@@ -299,7 +300,7 @@ torch.cuda.synchronize()
 torch.cuda.empty_cache()
 
 splits = zip(['test'], [test_cameras])
-results = test_util.evaluate(model, splits, "", args.tile_size, min_t, save=False)
+results = test_util.evaluate(model, splits, "", args.tile_size, min_t, save=False, n_quad_samples=args.n_quad_samples)
 
 all_data = dict(
     n_vertices = model.vertices.shape[0],

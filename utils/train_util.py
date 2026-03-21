@@ -9,8 +9,8 @@ from rmesh_renderer.tile_shader_slang import vertex_and_tile_shader
 import time
 from icecream import ic
 
-def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
-           scene_scaling=1, clip_multi=0, ray_jitter=None,
+def render(camera: Camera, model, vertex_values=None, tile_size=4, min_t=0.1,
+           scene_scaling=1, clip_multi=0, ray_jitter=None, n_quad_samples=2,
            **kwargs):
     device = model.device
     if ray_jitter is None:
@@ -20,7 +20,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         assert(ray_jitter.shape[1] == camera.image_width)
         assert(ray_jitter.shape[2] == 2)
     vertices = model.vertices
-    
+
     render_grid = RenderGrid(camera.image_height,
                              camera.image_width,
                              tile_height=tile_size,
@@ -39,24 +39,20 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         tcam,
         render_grid)
     extras = {}
-    if cell_values is None:
-        cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
-        if mask.sum() > 0 and model.mask_values:
-            shs, values = model.get_cell_values(camera, mask, circumcenter[mask])
-            cell_values[mask] = values
-        else:
-            shs, cell_values = model.get_cell_values(camera, all_circumcenters=circumcenter)
+    if vertex_values is None:
+        vertex_values = model.get_vertex_values(camera)
 
     image_rgb, xyzd_img, distortion_img, tet_alive = AlphaBlendTiledRender.apply(
         sorted_tetra_idx,
         tile_ranges,
         model.indices,
         vertices,
-        cell_values,
+        vertex_values,
         render_grid,
         tcam,
         ray_jitter,
-        model.additional_attr)
+        model.additional_attr,
+        n_quad_samples)
     alpha = image_rgb.permute(2,0,1)[3, ...].exp()
     total_density = (distortion_img[:, :, 2]**2).clip(min=1e-6)
     distortion_loss = (((distortion_img[:, :, 0] - distortion_img[:, :, 1]) + distortion_img[:, :, 4]) / total_density).clip(min=0)
@@ -64,7 +60,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
     # unrotate the xyz part of the xyzd_img
     rotated = xyzd_img[..., :3].reshape(-1, 3) @ camera.world_view_transform[:3, :3].to(device)
     rxyzd_img = torch.cat([rotated.reshape(xyzd_img[..., :3].shape), xyzd_img[..., 3:]], dim=-1)
-    
+
     render_pkg = {
         'aux': image_rgb.permute(2,0,1)[4:, ...] * camera.gt_alpha_mask.to(device),
         'render': image_rgb.permute(2,0,1)[:3, ...] * camera.gt_alpha_mask.to(device),
@@ -73,7 +69,7 @@ def render(camera: Camera, model, cell_values=None, tile_size=4, min_t=0.1,
         'mask': mask,
         'xyzd': rxyzd_img,
         'weight_square': image_rgb.permute(2,0,1)[4:5, ...],
-        "cell_values": cell_values,
+        "vertex_values": vertex_values,
         **extras
     }
     return render_pkg

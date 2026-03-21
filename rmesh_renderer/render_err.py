@@ -30,7 +30,7 @@ def gaussian_blur(img: torch.Tensor,
     return F.conv2d(img.unsqueeze(0), kernel, padding=pad,
                     groups=img.shape[0]).squeeze(0)
 
-def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1, **kwargs):
+def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1, n_quad_samples=2, **kwargs):
     device = model.device
     indices = model.indices.clone()
     vertices = model.vertices
@@ -60,9 +60,7 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
         vs_tetra.retain_grad()
     except:
         pass
-    cell_values = torch.zeros((mask.shape[0], model.feature_dim), device=circumcenter.device)
-    _, cell_values[mask] = model.get_cell_values(camera, mask)
-    # vertex_color, cell_values = model.get_cell_values(camera)
+    vertex_values = model.get_vertex_values(camera).detach()
 
     # torch.cuda.synchronize()
     # st = time.time()
@@ -82,14 +80,14 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
     ray_jitter = 0.5*torch.ones((camera.image_height, camera.image_width, 2), device=device)
 
     torch.cuda.synchronize()
-    shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0)
+    shader = shader_manager.get_interp(render_grid.tile_height, render_grid.tile_width, 0, n_quad_samples)
     st = time.time()
     args = dict(
         sorted_gauss_idx=sorted_tetra_idx,
         tile_ranges=tile_ranges,
         indices=indices,
         vertices=vertices,
-        cell_values=cell_values,
+        vertex_values=vertex_values,
         output_img=output_img,
         n_contributors=n_contributors,
         tcam=tcam,
@@ -151,5 +149,5 @@ def render_err(gt_image, gt_mask, camera: Camera, model, tile_size=16, min_t=0.1
         pixel_err = pixel_err,
         ssim_err = ssim_err,
         render_img = render_img,
-        cell_values = cell_values,
+        vertex_values = vertex_values,
     )

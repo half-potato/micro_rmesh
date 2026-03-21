@@ -11,13 +11,14 @@ class ShaderManager:
         self.vertex_shader = slangtorch.loadModule(os.path.join(shaders_dir, "vertex_shader.slang"))
         self.tile_shader = slangtorch.loadModule(os.path.join(shaders_dir, "tile_shader.slang"))
 
-    def get_interp(self, tile_height, tile_width, aux_dim):
-        key = (tile_height, tile_width, aux_dim, "interp")
+    def get_interp(self, tile_height, tile_width, aux_dim, n_quad_samples=2):
+        key = (tile_height, tile_width, aux_dim, n_quad_samples, "interp")
         if key not in self._cache:
             defines = {
                 "PYTHON_TILE_HEIGHT": tile_height,
                 "PYTHON_TILE_WIDTH": tile_width,
-                "PYTHON_AUX_DIM": aux_dim
+                "PYTHON_AUX_DIM": aux_dim,
+                "PYTHON_N_QUAD_SAMPLES": n_quad_samples,
             }
             self._cache[key] = slangtorch.loadModule(
                 os.path.join(self.shaders_dir, "alphablend_shader_interp.slang"),

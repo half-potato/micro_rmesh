@@ -113,7 +113,7 @@ def collect_render_stats(
         target = cam.original_image.cuda()
         gt_mask = cam.gt_alpha_mask.cuda()
 
-        image_votes, extras = render_err( target, gt_mask, cam, model, tile_size=args.tile_size)
+        image_votes, extras = render_err( target, gt_mask, cam, model, tile_size=args.tile_size, n_quad_samples=getattr(args, 'n_quad_samples', 2))
 
         tc = extras["tet_count"][..., 0]
         max_T = extras["tet_count"][..., 1].float() / 65535
