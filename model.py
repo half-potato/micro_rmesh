@@ -1999,8 +1999,13 @@ class VertexModel(torch.nn.Module):
         return self.interior_vertices.shape[0]
 
     def get_vertex_values(self, camera) -> torch.Tensor:
-        """Compute per-vertex (sigma, r, g, b) tensor of shape (V, 4)."""
-        density = safe_exp(self.sigma + self._density_offset)  # (V, 1)
+        """Compute per-vertex (sigma, r, g, b) tensor of shape (V, 4).
+
+        Pass raw sigma + offset to the shader. The shader's max(x, 0) provides
+        the nonlinearity — unit gradient for positive density, zero for negative.
+        This fixes the vanishing gradient problem of exp() at low density.
+        """
+        density = self.sigma + self._density_offset  # (V, 1) — raw, can be negative
 
         sh_dim = (self.max_sh_deg + 1) ** 2 - 1
         if sh_dim == 0:
@@ -2020,7 +2025,7 @@ class VertexModel(torch.nn.Module):
 
     def calc_tet_density(self):
         """Average vertex density per tet (for culling)."""
-        density = safe_exp(self.sigma + self._density_offset).reshape(-1)
+        density = (self.sigma + self._density_offset).clamp(min=0).reshape(-1)
         tet_verts = self.indices.long()  # (T, 4)
         return density[tet_verts].mean(dim=1)
 
@@ -2108,8 +2113,8 @@ class VertexModel(torch.nn.Module):
         V = all_verts.shape[0]
         sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
 
-        # Per-vertex parameters
-        sigma = torch.zeros((V, 1), device=device)
+        # Per-vertex parameters — init density ≈ 0.01 (comparable to exp(-4)=0.018)
+        sigma = torch.full((V, 1), 0.01, device=device)
         rgb = torch.full((V, 3), 0.5, device=device)
         sh = torch.zeros((V, sh_dim // 3, 3), device=device)
 

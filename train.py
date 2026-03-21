@@ -58,8 +58,8 @@ args.sh_step = 1
 args.freeze_lr = 6e-3
 args.final_freeze_lr = 6e-4
 args.additional_attr = 0
-args.n_quad_samples = 4
-args.density_offset = -4
+args.n_quad_samples = 2
+args.density_offset = 0
 
 # Vertex Settings
 args.lr_delay = 0
@@ -154,8 +154,8 @@ step = 0
 while True:
     torch.cuda.synchronize()
     t0 = time.time()
-    do_delaunay = False  # disabled for vertex model testing
-    do_cloning = False   # disabled for vertex model testing
+    do_delaunay = False
+    do_cloning = False
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
