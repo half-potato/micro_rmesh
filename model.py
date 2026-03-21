@@ -2003,7 +2003,6 @@ class VertexModel(torch.nn.Module):
 
         Pass raw sigma + offset to the shader. The shader's max(x, 0) provides
         the nonlinearity — unit gradient for positive density, zero for negative.
-        This fixes the vanishing gradient problem of exp() at low density.
         """
         density = self.sigma + self._density_offset  # (V, 1) — raw, can be negative
 
@@ -2113,7 +2112,7 @@ class VertexModel(torch.nn.Module):
         V = all_verts.shape[0]
         sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
 
-        # Per-vertex parameters — init density ≈ 0.01 (comparable to exp(-4)=0.018)
+        # Per-vertex parameters — init density ≈ 0.01
         sigma = torch.full((V, 1), 0.01, device=device)
         rgb = torch.full((V, 3), 0.5, device=device)
         sh = torch.zeros((V, sh_dim // 3, 3), device=device)

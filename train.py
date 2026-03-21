@@ -222,7 +222,7 @@ while True:
         tet_optim.sh_optim.step()
         tet_optim.sh_optim.zero_grad()
 
-    if step % 5 == 0:
+    if True:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
