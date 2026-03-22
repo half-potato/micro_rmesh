@@ -2305,7 +2305,7 @@ class VertexOptimizer:
 
     @torch.no_grad()
     def split_tets_inplace(self, split_mask):
-        """Densification: add vertices at centroids of selected tets."""
+        """Densification: add vertices at centroids of selected tets, averaged attributes."""
         model = self.model
         split_idx = torch.where(split_mask)[0]
         K = split_idx.shape[0]
@@ -2317,7 +2317,115 @@ class VertexOptimizer:
         verts = model.vertices
         centroids = verts[split_tet_verts].float().mean(dim=1)  # (K, 3)
 
-        self.add_vertices(centroids)
+        # Average attributes from all 4 vertices (not nearest-neighbor)
+        new_sigma = model.sigma.data[split_tet_verts].mean(dim=1)  # (K, 1)
+        new_rgb = model.rgb.data[split_tet_verts].mean(dim=1)      # (K, 3)
+        new_sh = model.sh.data[split_tet_verts].mean(dim=1)        # (K, sh_dim//3, 3)
+
+        # Extend interior_vertices via optimizer (preserves Adam state)
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=centroids)
+        )["interior_vertices"]
+
+        # Extend per-vertex params with averaged values
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+        print(f"Split {K} tets (averaged attrs) (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+
+    @torch.no_grad()
+    def add_vertices_midpoint(self, edges: torch.Tensor):
+        """Add vertices at edge midpoints with averaged endpoint attributes.
+
+        Args:
+            edges: (K, 2) int tensor of vertex index pairs to split.
+        """
+        model = self.model
+        K = edges.shape[0]
+        if K == 0:
+            return
+
+        v0 = edges[:, 0].long()
+        v1 = edges[:, 1].long()
+        verts = model.vertices
+
+        # Midpoint positions
+        new_positions = (verts[v0] + verts[v1]) / 2
+
+        # Averaged attributes (exact for linear interpolation)
+        new_sigma = (model.sigma.data[v0] + model.sigma.data[v1]) / 2
+        new_rgb = (model.rgb.data[v0] + model.rgb.data[v1]) / 2
+        new_sh = (model.sh.data[v0] + model.sh.data[v1]) / 2
+
+        # Extend interior_vertices via optimizer (preserves Adam state)
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=new_positions)
+        )["interior_vertices"]
+
+        # Extend per-vertex params
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+        print(f"Edge midpoint split: added {K} vertices (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+
+    @torch.no_grad()
+    def clone_vertices(self, clone_idx: torch.Tensor, offset_scale: float = 0.0):
+        """Clone vertices by index, copying all attributes exactly.
+
+        Args:
+            clone_idx: (K,) int tensor of interior vertex indices to clone.
+            offset_scale: positional offset magnitude (0 = exact duplicate position).
+        """
+        model = self.model
+        K = clone_idx.shape[0]
+        if K == 0:
+            return
+
+        # Positions: clone with optional small offset
+        new_positions = model.interior_vertices.data[clone_idx].clone()
+        if offset_scale > 0:
+            offset = torch.randn_like(new_positions) * offset_scale
+            new_positions = new_positions + offset
+
+        # Copy attributes exactly
+        new_sigma = model.sigma.data[clone_idx].clone()
+        new_rgb = model.rgb.data[clone_idx].clone()
+        new_sh = model.sh.data[clone_idx].clone()
+
+        # Extend interior_vertices via optimizer
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=new_positions)
+        )["interior_vertices"]
+
+        # Extend per-vertex params
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+        print(f"Cloned {K} vertices (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
 
     def clip_grad_norm_(self, max_norm):
         torch.nn.utils.clip_grad_norm_(self.model.sigma, max_norm)

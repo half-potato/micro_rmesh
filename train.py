@@ -21,7 +21,7 @@ from utils.args import Args
 import json
 import test_util
 import gc
-from utils.densification import collect_render_stats, apply_densification
+from utils.densification import collect_render_stats, apply_densification, apply_grad_densification
 from utils.decimation import apply_decimation
 
 
@@ -151,11 +151,56 @@ smooth_train_loss = 0
 total_training_time = 0
 step = 0
 
+# Upfront densification: add perturbed copies of initial vertices
+init_upsample = 2  # multiplier: 2 = double the vertices at start
+if init_upsample > 1:
+    with torch.no_grad():
+        n_int = model.interior_vertices.shape[0]
+        old_pos = model.interior_vertices.data
+        n_copies = init_upsample - 1
+        new_positions_list = []
+        for _ in range(n_copies):
+            noise = torch.randn_like(old_pos) * 0.05
+            new_positions_list.append(old_pos + noise)
+        new_positions = torch.cat(new_positions_list, dim=0)
+
+        # Initialize attributes by copying from parent vertices
+        parent_idx = torch.arange(n_int, device=device).repeat(n_copies)
+        new_sigma = model.sigma.data[parent_idx].clone()
+        new_rgb = model.rgb.data[parent_idx].clone()
+        new_sh = model.sh.data[parent_idx].clone()
+
+        model.interior_vertices = tet_optim.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=new_positions)
+        )["interior_vertices"]
+
+        model.sigma = torch.nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = torch.nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = torch.nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        tet_optim._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+        print(f"Upfront densification: {n_int} to {model.vertices.shape[0]} vertices, {model.indices.shape[0]} tets")
+
+# Gradient-based densification (disabled for this experiment)
+grad_accum = torch.zeros(model.interior_vertices.shape[0], device=device)
+grad_count = torch.zeros(model.interior_vertices.shape[0], device=device)
+densify_grad_interval = 100
+densify_grad_start = 99999
+densify_grad_end = 99999
+densify_grad_target = 3000  # vertices per round
+
 while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
     do_cloning = False
+    do_grad_densify = (step >= densify_grad_start and step < densify_grad_end
+                       and step % densify_grad_interval == 0 and step > 0)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
@@ -215,6 +260,13 @@ while True:
 
     loss.backward()
 
+    # Accumulate vertex position gradient norms for densification
+    if model.interior_vertices.grad is not None and step < densify_grad_end:
+        g = model.interior_vertices.grad.detach()
+        n_cur = min(g.shape[0], grad_accum.shape[0])
+        grad_accum[:n_cur] += g[:n_cur].norm(dim=1)
+        grad_count[:n_cur] += 1
+
     tet_optim.main_step()
     tet_optim.main_zero_grad()
 
@@ -261,6 +313,25 @@ while True:
             del stats
             gc.collect()
             torch.cuda.empty_cache()
+
+    if do_grad_densify:
+        with torch.no_grad():
+            target = min(densify_grad_target, test_util.VERT_BUDGET - model.vertices.shape[0])
+            if target > 0:
+                apply_grad_densification(
+                    model, tet_optim, grad_accum, grad_count,
+                    target_addition=target, mode="edge_midpoint")
+                # Resize accumulators for new vertex count
+                new_n = model.interior_vertices.shape[0]
+                new_accum = torch.zeros(new_n, device=device)
+                new_count = torch.zeros(new_n, device=device)
+                n_old = min(grad_accum.shape[0], new_n)
+                new_accum[:n_old] = grad_accum[:n_old]
+                new_count[:n_old] = grad_count[:n_old]
+                grad_accum = new_accum
+                grad_count = new_count
+                gc.collect()
+                torch.cuda.empty_cache()
 
     if do_decimation:
         with torch.no_grad():

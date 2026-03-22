@@ -102,3 +102,60 @@ With softplus + densification + Delaunay: **19.58** — no catastrophic failure 
   - Can per-vertex feature dimension be increased (e.g. more SH bands, or per-vertex gradient)?
   - Try softplus on the SimpleModel (per-tet) — does it help convergence there too?
   - The 51k vertex ceiling: is it capacity-limited or training-time-limited?
+
+## Shift: 2026-03-22
+Goals: Improve densification and retriangulation. Break through the 51k vertex ceiling.
+
+### Investigation 1: Gradient-based edge midpoint splitting
+
+**Question**: Can we improve densification by (a) targeting edges with high vertex gradient norms and (b) initializing new vertices with averaged endpoint attributes instead of nearest-neighbor?
+
+**Hypothesis**: The old densification fails because nearest-neighbor attribute initialization corrupts the interpolation field. Edge midpoints with averaged attributes should preserve it exactly.
+
+**Method**:
+- Accumulate vertex position gradient norms during training
+- At densification, build edge list, score edges by endpoint gradient sum
+- Split top-k edges by adding midpoint vertices with averaged (sigma, rgb, sh)
+- Schedule: 3000 vertices every 100 steps, steps 200-1100
+
+**Results**: 19.60 PSNR with 81k vertices (baseline: 19.77 with 51k)
+
+**Discovery**: **Attribute initialization is not the bottleneck — Delaunay retriangulation is.** Even with perfect midpoint-averaged attributes, each Delaunay completely restructures the tet topology. 10 retriangulations over training cost ~500 steps of training time, and each one partially undoes learned interpolation patterns. The extra vertices don't compensate for the disruption.
+
+### Investigation 2: Upfront vertex densification (avoid mid-training retriangulation)
+
+**Question**: What if we add all extra vertices before training starts, avoiding mid-training retriangulation entirely?
+
+**Hypothesis**: The model is capacity-limited at 51k vertices, but mid-training retriangulation is too disruptive. Starting with more vertices sidesteps the retriangulation problem entirely.
+
+**Method**: Before training, duplicate each initial COLMAP vertex with a small random offset (noise_scale=0.05), then run Delaunay once. No mid-training densification or retriangulation.
+
+| Config | PSNR | n_vertices | Notes |
+|---|---|---|---|
+| Baseline (51k, no densify) | 19.77 | 51358 | ~1750 steps in 10 min |
+| Grad edge midpoint (10 retriangs) | 19.60 | 81358 | Retriangulation disrupts learning |
+| **2x init (offset 0.05)** | **20.09** | **102716** | **+0.32 dB, no mid-training retriang** |
+| 2x init (offset 0.005) | crash | 102716 | NaN: close vertices create degenerate tets |
+| 4x init (offset 0.05) | hung | 205432 | Stalled at step 750, 1.3M tets too heavy |
+
+**Discovery**: **Upfront densification works.** 2x initial vertices gives +0.32 dB (19.77 to 20.09) with minimal per-step slowdown (~0.20s vs ~0.18s per step). The model IS capacity-limited, but the solution is to start dense, not to add vertices mid-training.
+
+**Critical finding on offset scale**: Offset 0.005 creates NaN at step ~400 because near-duplicate vertices produce degenerate tets. Offset 0.05 is stable. This sets a lower bound on vertex spacing for Delaunay meshes.
+
+**4x scaling failure**: 205k vertices with 1.3M tets appeared to run but hung silently at step 750. Likely GPU memory pressure (24GB VRAM) causing kernel stalls. There's a practical upper limit on mesh size.
+
+### End-of-shift summary
+
+- **Best PSNR**: 20.09 (2x upfront densification, 102k vertices)
+- **Improvement**: +0.32 dB over previous best (19.77), +1.66 dB over original baseline (18.43)
+- **Key discoveries**:
+  1. **Mid-training retriangulation is the densification bottleneck** — not attribute initialization, not targeting strategy. Each Delaunay restructures the entire mesh topology.
+  2. **Upfront densification avoids this entirely** — duplicate initial vertices with random offset before training. Simple, effective, no disruption.
+  3. **Vertex spacing matters** — offsets < 0.01 create degenerate tets that cause NaN. Offset 0.05 is stable.
+  4. **The model is capacity-limited** — 2x vertices immediately improves quality without changing anything else.
+  5. **4x vertices hits GPU limits** — 1.3M tets causes stalls on 24GB VRAM.
+- **Open questions for next shift**:
+  - What's the optimal upsample factor? 3x might work without the 4x GPU issues.
+  - Can we combine upfront densification with smarter initial placement (e.g., FPS upsampling, surface-aware jitter)?
+  - With 102k vertices, is the model still capacity-limited or now training-time-limited?
+  - Would adaptive LR schedules help the larger model converge faster?

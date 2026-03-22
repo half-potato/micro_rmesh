@@ -4,6 +4,7 @@ import torch
 from utils import safe_math
 from typing import NamedTuple, List
 from rmesh_renderer.render_err import render_err
+from utils.decimation import build_edge_list
 from icecream import ic
 
 def get_approx_ray_intersections(split_rays_data, epsilon=1e-7):
@@ -249,3 +250,64 @@ def apply_densification(
         f"#Alive: {mask_alive.sum():4d} | "
         f"Total Avg: {total_var.mean():.4f} Within Avg: {within_var.mean():.4f} "
     )
+
+
+@torch.no_grad()
+def apply_grad_densification(
+    model,
+    tet_optim,
+    grad_accum: torch.Tensor,
+    grad_count: torch.Tensor,
+    target_addition: int,
+    mode: str = "edge_midpoint",
+):
+    """Gradient-based densification: split edges or clone vertices with highest grad norms.
+
+    Args:
+        model: VertexModel
+        tet_optim: VertexOptimizer
+        grad_accum: (V_int,) accumulated gradient norms for interior vertices
+        grad_count: (V_int,) number of accumulations per vertex
+        target_addition: max number of new vertices to add
+        mode: "edge_midpoint" or "clone"
+    """
+    n_int = model.num_int_verts
+    v_grad = grad_accum / grad_count.clamp(min=1)
+    v_grad[grad_count < 10] = 0  # need enough samples
+
+    if target_addition <= 0:
+        return
+
+    if mode == "edge_midpoint":
+        # Build edge list and score edges by sum of endpoint gradients
+        edges = build_edge_list(model.indices)  # (E, 2)
+
+        # Only split edges where both vertices are interior
+        int_mask = (edges[:, 0] < n_int) & (edges[:, 1] < n_int)
+        edge_score = torch.zeros(edges.shape[0], device=model.device)
+        edge_score[int_mask] = v_grad[edges[int_mask, 0]] + v_grad[edges[int_mask, 1]]
+
+        # Select top-k edges
+        k = min(target_addition, int(int_mask.sum().item()))
+        if k == 0:
+            return
+        _, top_idx = edge_score.topk(k)
+        edges_to_split = edges[top_idx]
+
+        print(f"Grad densify (edge_midpoint): splitting {k} edges "
+              f"(grad range: {edge_score[top_idx].min():.4f} - {edge_score[top_idx].max():.4f})")
+        tet_optim.add_vertices_midpoint(edges_to_split)
+
+    elif mode == "clone":
+        # Clone top-k vertices by gradient norm
+        k = min(target_addition, n_int)
+        if k == 0:
+            return
+        _, top_idx = v_grad[:n_int].topk(k)
+
+        print(f"Grad densify (clone): cloning {k} vertices "
+              f"(grad range: {v_grad[top_idx].min():.4f} - {v_grad[top_idx].max():.4f})")
+        tet_optim.clone_vertices(top_idx, offset_scale=0.001)
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
