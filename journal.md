@@ -67,16 +67,38 @@ Goals: Understand VertexModel behavior, fix training instability, tune from untu
 
 - **Best PSNR**: 19.76 (raw density + vertex opt every step, 51k vertices)
 - **Improvement**: +1.33 dB over untuned baseline (18.43)
+### Investigation 5: Density activation — finding the right nonlinearity
+
+**Question**: ReLU (max(x,0)) fixes convergence but creates discontinuities that break densification and retriangulation. Can we get the gradient benefits of ReLU while staying smooth?
+
+**Key insight**: For any smooth positive function f, if f(x_init) is small then f'(x_init) is also small (the function must be climbing from near-zero). The exception: **softplus(x, beta)** = ln(1+exp(beta*x))/beta. At x=0: value = ln(2)/beta (tunable via beta), gradient = sigmoid(0) = **0.5 always** regardless of beta.
+
+| Activation | PSNR | Grad@init | Smooth? | Densify-safe? |
+|---|---|---|---|---|
+| exp(sigma-4) [original] | 18.43 | 0.018 | yes | yes |
+| raw sigma + max(x,0) | 19.76 | 1.0 | no | no |
+| exp in shader (log interp) | 18.24 | 0.018 | yes | yes |
+| softplus(sigma, beta=20) | ~19.4 | 0.5 | yes | yes |
+| **softplus(sigma, beta=40)** | **19.68** | **0.5** | **yes** | **yes** |
+| softplus(beta=5) | diverged | 0.5 | yes | — |
+
+beta=40 gives initial density = ln(2)/40 = 0.017 (matching exp(-4)=0.018) with 28x stronger gradient. beta=5 was too opaque initially (density=0.139). beta=20 worked but slightly lower final PSNR.
+
+With softplus + densification + Delaunay: **19.58** — no catastrophic failure (unlike ReLU which dropped 0.67 dB with Delaunay). But densification still doesn't help meaningfully.
+
+**Discovery**: The densification problem is NOT caused by the activation function. Even with smooth softplus, adding 130k vertices via nearest-neighbor copy barely helps. The per-tet error-based densification strategy simply doesn't translate well to per-vertex needs.
+
 - **Key discoveries**:
-  1. **exp() density activation has vanishing gradients** at initialization — the dominant source of training instability
-  2. **Raw density with ReLU in shader** fixes convergence and gives +1.0 dB
-  3. **Every-step vertex optimization** gives +0.34 dB for vertex model (different optimum than per-tet model)
-  4. **Delaunay retriangulation hurts** the vertex model (-0.67 dB)
-  5. **Densification barely helps** (+0.13 dB for 3.5x more vertices) — the bottleneck is not vertex count
+  1. **exp() density activation has vanishing gradients** — the dominant source of training instability
+  2. **softplus(sigma, beta=40)** is the right fix: 28x stronger gradient, smooth, always positive, densify-safe
+  3. **Every-step vertex optimization** gives +0.34 dB for vertex model
+  4. **Delaunay retriangulation** is neutral with softplus, harmful with ReLU
+  5. **Densification doesn't help** regardless of activation — the bottleneck is the densification strategy itself, not the activation
   6. **Log-space interpolation (exp in shader) is worse** due to Jensen's inequality
   7. Loss function tuning (SSIM, BW-SSIM) has negligible effect
+- **Best config**: softplus(sigma, beta=40) + vertex opt every step + no densification + no Delaunay = **19.68 PSNR**
 - **Open questions for next shift**:
-  - The 51k vertex model seems capacity-limited at ~19.8. Can per-vertex feature vectors increase capacity without more vertices?
-  - Try the raw density fix on the SimpleModel (per-tet) — does it help there too?
-  - Why does densification not help? Is the error-based selection bad, or is nearest-neighbor attribute initialization the problem?
-  - Explore higher SH degree or additional per-vertex learnable features
+  - Why doesn't densification help? The per-tet error metric doesn't target per-vertex needs. Need a vertex-native densification strategy.
+  - Can per-vertex feature dimension be increased (e.g. more SH bands, or per-vertex gradient)?
+  - Try softplus on the SimpleModel (per-tet) — does it help convergence there too?
+  - The 51k vertex ceiling: is it capacity-limited or training-time-limited?
