@@ -58,6 +58,13 @@ def vertex_and_tile_shader(indices,
         index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
         max_mask = (tiles_touched == cam['grid_width']*cam['grid_height'])
         total_size_index_buffer = index_buffer_offset[-1]
+        if not hasattr(vertex_and_tile_shader, '_log_count'):
+            vertex_and_tile_shader._log_count = 0
+        vertex_and_tile_shader._log_count += 1
+        if vertex_and_tile_shader._log_count <= 2:
+            avg_tiles = tiles_touched[tiles_touched > 0].float().mean().item()
+            print(f"[TILE] #tets={n_tetra} total_idx_buf={total_size_index_buffer} avg_tiles/tet={avg_tiles:.1f} "
+                  f"idx_buf_MB={(total_size_index_buffer*12)/(1024*1024):.1f}")
         unsorted_keys = torch.zeros((total_size_index_buffer,), 
                                     device="cuda", 
                                     dtype=torch.int64)

@@ -155,8 +155,38 @@ Goals: Improve densification and retriangulation. Break through the 51k vertex c
   3. **Vertex spacing matters** — offsets < 0.01 create degenerate tets that cause NaN. Offset 0.05 is stable.
   4. **The model is capacity-limited** — 2x vertices immediately improves quality without changing anything else.
   5. **4x vertices hits GPU limits** — 1.3M tets causes stalls on 24GB VRAM.
+### Investigation 3: Tile size as VRAM bottleneck
+
+**Question**: Why does 4x (205k verts, 1.3M tets) use 24GB VRAM when the parameters are only ~10MB?
+
+**Method**: Added instrumentation to `tile_shader_slang.py` and `train.py` to measure index buffer size and VRAM usage.
+
+**Root cause**: The tile-based rasterizer creates an index buffer of size `O(T * tiles_per_tet)`. With tile_size=4 on 1237x822 images, the grid is 310x206 = 63k tiles, and each tet spans **126 tiles on average** (its screen-space bounding box covers ~44x44 pixels = 11x11 tiles). This creates a 32M-entry index buffer (368MB), plus CUB sort temporary storage inflates PyTorch's reserved memory to **3GB**.
+
+**Fix**: tile_size=16 reduces tiles-per-tet from 126 to **9** (14x reduction). The index buffer shrinks from 32M to 3M entries. VRAM drops from 3058MB to **472MB**.
+
+| tile_size | tiles/tet | idx_buf_MB | VRAM_reserved | steps/s |
+|---|---|---|---|---|
+| 4 | 126 | 368 | 3058 MB | ~2.5 |
+| 16 | 9 | 36 | 472 MB | ~3.5 |
+
+**Discovery**: **tile_size=16 is strictly better** for this mesh density — faster per step AND uses 6x less VRAM. The smaller sort dominates any wasted-work cost from larger tiles.
+
+**Combined result**: 4x upfront + tile_size=16 = **20.61 PSNR** with 205k vertices. +0.84 dB over baseline. More training steps (2100 vs 1750) despite 4x more vertices, because tile_size=16 is faster per step.
+
+### Updated end-of-shift summary
+
+- **Best PSNR**: 20.61 (4x upfront densification + tile_size=16, 205k vertices)
+- **Improvement**: +0.84 dB over previous best (19.77), +2.18 dB over original baseline (18.43)
+- **Key discoveries**:
+  1. **Mid-training retriangulation is disruptive** — topology change, not Delaunay compute cost, is the problem
+  2. **Upfront densification works** — duplicate initial vertices with random offset before training
+  3. **tile_size=4 was the VRAM bottleneck** — O(T*tiles/tet) index buffer + CUB sort temp = 3GB for 1M tets
+  4. **tile_size=16 is strictly better** — 14x smaller index buffer, faster per step, 6x less VRAM
+  5. **The model is capacity-limited** — 4x vertices = +0.84 dB with room to scale further
+  6. **Vertex spacing** — offsets < 0.01 create degenerate tets (NaN)
 - **Open questions for next shift**:
-  - What's the optimal upsample factor? 3x might work without the 4x GPU issues.
-  - Can we combine upfront densification with smarter initial placement (e.g., FPS upsampling, surface-aware jitter)?
-  - With 102k vertices, is the model still capacity-limited or now training-time-limited?
-  - Would adaptive LR schedules help the larger model converge faster?
+  - Scale to 500k+ vertices (10x+) — the VRAM headroom now exists
+  - What's the PSNR ceiling with unlimited vertices? Are we training-time-limited at 500k?
+  - Can we use even larger tiles (32x32) for further scaling?
+  - Would the evaluation harness need tile_size=16 too? (test_util.py is read-only)

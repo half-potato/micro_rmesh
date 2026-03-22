@@ -42,7 +42,7 @@ class CustomEncoder(json.JSONEncoder):
 
 eps = torch.finfo(torch.float).eps
 args = Args()
-args.tile_size = 4
+args.tile_size = 16
 args.image_folder = "images_4"
 args.dataset_path = Path("/optane/nerf_datasets/360/bicycle")
 args.ckpt = ""
@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 3  # multiplier: 3x initial vertices. Best: 20.19 PSNR
+init_upsample = 4  # testing 4x with tile_size=16
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]
@@ -228,6 +228,10 @@ while True:
     render_pkg = render(camera, model, ray_jitter=ray_jitter, **args.as_dict())
     image = render_pkg['render']
 
+    if step == 11:
+        alloc = torch.cuda.memory_allocated() / (1024**2)
+        reserved = torch.cuda.memory_reserved() / (1024**2)
+        print(f"[VRAM] allocated={alloc:.0f}MB reserved={reserved:.0f}MB after render")
     l1_loss = ((target - image).abs() * gt_mask).mean()
     l2_loss = ((target - image)**2 * gt_mask).mean()
     reg = tet_optim.regularizer(render_pkg, **args.as_dict())
