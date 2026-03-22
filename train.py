@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 2  # multiplier: 2 = double the vertices at start
+init_upsample = 3  # multiplier: 3x initial vertices. Best: 20.19 PSNR
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]

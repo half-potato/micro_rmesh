@@ -134,7 +134,8 @@ Goals: Improve densification and retriangulation. Break through the 51k vertex c
 |---|---|---|---|
 | Baseline (51k, no densify) | 19.77 | 51358 | ~1750 steps in 10 min |
 | Grad edge midpoint (10 retriangs) | 19.60 | 81358 | Retriangulation disrupts learning |
-| **2x init (offset 0.05)** | **20.09** | **102716** | **+0.32 dB, no mid-training retriang** |
+| 2x init (offset 0.05) | 20.09 | 102716 | +0.32 dB, no mid-training retriang |
+| **3x init (offset 0.05)** | **20.19** | **154074** | **+0.42 dB, new best** |
 | 2x init (offset 0.005) | crash | 102716 | NaN: close vertices create degenerate tets |
 | 4x init (offset 0.05) | hung | 205432 | Stalled at step 750, 1.3M tets too heavy |
 
@@ -146,8 +147,8 @@ Goals: Improve densification and retriangulation. Break through the 51k vertex c
 
 ### End-of-shift summary
 
-- **Best PSNR**: 20.09 (2x upfront densification, 102k vertices)
-- **Improvement**: +0.32 dB over previous best (19.77), +1.66 dB over original baseline (18.43)
+- **Best PSNR**: 20.19 (3x upfront densification, 154k vertices)
+- **Improvement**: +0.42 dB over previous best (19.77), +1.76 dB over original baseline (18.43)
 - **Key discoveries**:
   1. **Mid-training retriangulation is the densification bottleneck** — not attribute initialization, not targeting strategy. Each Delaunay restructures the entire mesh topology.
   2. **Upfront densification avoids this entirely** — duplicate initial vertices with random offset before training. Simple, effective, no disruption.
