@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 4  # testing 4x with tile_size=16
+init_upsample = 8  # 8x: 20.77 PSNR, 411k verts, 694MB VRAM
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]
