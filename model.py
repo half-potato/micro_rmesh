@@ -2001,10 +2001,11 @@ class VertexModel(torch.nn.Module):
     def get_vertex_values(self, camera) -> torch.Tensor:
         """Compute per-vertex (sigma, r, g, b) tensor of shape (V, 4).
 
-        Pass raw sigma + offset to the shader. The shader's max(x, 0) provides
-        the nonlinearity — unit gradient for positive density, zero for negative.
+        Softplus(sigma, beta=40) for density: always positive, smooth, with
+        gradient=0.5 at sigma=0. At sigma=0: density=ln(2)/40=0.017, gradient=0.5
+        (28x stronger than exp(-4)=0.018).
         """
-        density = self.sigma + self._density_offset  # (V, 1) — raw, can be negative
+        density = torch.nn.functional.softplus(self.sigma, beta=40.0)  # (V, 1)
 
         sh_dim = (self.max_sh_deg + 1) ** 2 - 1
         if sh_dim == 0:
@@ -2024,7 +2025,7 @@ class VertexModel(torch.nn.Module):
 
     def calc_tet_density(self):
         """Average vertex density per tet (for culling)."""
-        density = (self.sigma + self._density_offset).clamp(min=0).reshape(-1)
+        density = torch.nn.functional.softplus(self.sigma, beta=40.0).reshape(-1)
         tet_verts = self.indices.long()  # (T, 4)
         return density[tet_verts].mean(dim=1)
 
@@ -2112,8 +2113,8 @@ class VertexModel(torch.nn.Module):
         V = all_verts.shape[0]
         sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
 
-        # Per-vertex parameters — init density ≈ 0.01
-        sigma = torch.full((V, 1), 0.01, device=device)
+        # Per-vertex parameters — softplus(0, beta=40) = ln(2)/40 ≈ 0.017
+        sigma = torch.zeros((V, 1), device=device)
         rgb = torch.full((V, 3), 0.5, device=device)
         sh = torch.zeros((V, sh_dim // 3, 3), device=device)
 
