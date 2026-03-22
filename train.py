@@ -59,7 +59,7 @@ args.freeze_lr = 6e-3
 args.final_freeze_lr = 6e-4
 args.additional_attr = 0
 args.n_quad_samples = 2
-args.density_offset = 0
+args.density_offset = -4
 
 # Vertex Settings
 args.lr_delay = 0

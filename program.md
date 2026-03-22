@@ -40,11 +40,11 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 - Modify `utils/decimation.py` — edge collapse strategy.
 - Modify `utils/model_util.py` — feature activation, color field processing.
 - Modify `utils/optim.py` — custom Adam optimizer wrapper.
+- Modify `rmesh_renderer/*`. It contains the Slang-based tile rendering pipeline and shaders.
 - Everything is fair game: architecture, optimizer, hyperparameters, training loop, batch size, model size, densification/decimation strategy, loss functions, etc.
 
 **What you CANNOT do:**
 - Modify `data/*`. It is read-only. It contains camera/dataset loading (COLMAP format, intrinsics, extrinsics, images).
-- Modify `rmesh_renderer/*`. It is read-only. It contains the Slang-based tile rendering pipeline and shaders.
 - Modify `submodules/*`. It is read-only. It contains the LPIPS metric (`lpipsPyTorch`).
 - Modify `test_util.py`. It is read-only. It contains the evaluation function and the constants `VERT_BUDGET` (500k) and `TIME_BUDGET` (600s).
 - Modify `utils/train_util.py`. It is read-only. It contains the `render()` function.

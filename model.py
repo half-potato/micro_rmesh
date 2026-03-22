@@ -1970,7 +1970,7 @@ class VertexModel(torch.nn.Module):
         # Per-vertex learnable parameters
         self.sigma = nn.Parameter(sigma, requires_grad=True)       # (V, 1) log-density
         self.rgb = nn.Parameter(rgb, requires_grad=True)           # (V, 3) DC color
-        self.sh = nn.Parameter(sh.half(), requires_grad=True)      # (V, sh_dim//3, 3)
+        self.sh = nn.Parameter(sh, requires_grad=True)              # (V, sh_dim//3, 3) fp32
 
         # Config
         self.max_sh_deg = max_sh_deg
@@ -2001,11 +2001,10 @@ class VertexModel(torch.nn.Module):
     def get_vertex_values(self, camera) -> torch.Tensor:
         """Compute per-vertex (sigma, r, g, b) tensor of shape (V, 4).
 
-        Softplus(sigma, beta=40) for density: always positive, smooth, with
-        gradient=0.5 at sigma=0. At sigma=0: density=ln(2)/40=0.017, gradient=0.5
-        (28x stronger than exp(-4)=0.018).
+        Pass raw sigma + offset (log-density) to the shader. The shader applies
+        exp() after barycentric interpolation — interpolation in log-space.
         """
-        density = torch.nn.functional.softplus(self.sigma, beta=40.0)  # (V, 1)
+        density = self.sigma + self._density_offset  # (V, 1) log-density
 
         sh_dim = (self.max_sh_deg + 1) ** 2 - 1
         if sh_dim == 0:
@@ -2025,7 +2024,7 @@ class VertexModel(torch.nn.Module):
 
     def calc_tet_density(self):
         """Average vertex density per tet (for culling)."""
-        density = torch.nn.functional.softplus(self.sigma, beta=40.0).reshape(-1)
+        density = safe_exp(self.sigma + self._density_offset).reshape(-1)
         tet_verts = self.indices.long()  # (T, 4)
         return density[tet_verts].mean(dim=1)
 
@@ -2113,7 +2112,7 @@ class VertexModel(torch.nn.Module):
         V = all_verts.shape[0]
         sh_dim = ((1 + max_sh_deg) ** 2 - 1) * 3
 
-        # Per-vertex parameters — softplus(0, beta=40) = ln(2)/40 ≈ 0.017
+        # Per-vertex parameters
         sigma = torch.zeros((V, 1), device=device)
         rgb = torch.full((V, 3), 0.5, device=device)
         sh = torch.zeros((V, sh_dim // 3, 3), device=device)
@@ -2185,7 +2184,7 @@ class VertexOptimizer:
         ], eps=1e-15)
         self.sh_optim = optim.CustomAdam([
             {"params": [model.sh], "lr": freeze_lr, "name": "sh"},
-        ], eps=1e-7)  # half-precision safe eps
+        ], eps=1e-15)
         self.vert_lr_multi = float(model.scene_scaling.cpu())
         self.vertex_optim = optim.CustomAdam([
             {

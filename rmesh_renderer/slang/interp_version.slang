@@ -287,7 +287,7 @@ inline CtrlPt integrate_tetra_segment_vertex(
         float4 attr_s = bary_0 * g.v_sigma_rgb[0] + bary_123.x * g.v_sigma_rgb[1]
                        + bary_123.y * g.v_sigma_rgb[2] + bary_123.z * g.v_sigma_rgb[3];
 
-        float sigma_s = max(attr_s.x, 0.f);
+        float sigma_s = safe_exp(attr_s.x);
         float3 color_s = float3(attr_s.y, attr_s.z, attr_s.w);
 
         float tau_s = sigma_s * sub_dt;
