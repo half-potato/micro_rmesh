@@ -262,49 +262,76 @@ inline CtrlPt integrate_tetra_segment_vertex(
     float3 e3 = g.tet.verts[3] - g.tet.verts[0];
     float det_val = dot(e1, cross(e2, e3));
 
-    // Safe inverse: for degenerate tets, ray-tet intersection already
-    // rejects them, so this just prevents NaN in autodiff
     float inv_det = safe_div(1.0f, det_val);
     float3 r0 = cross(e2, e3) * inv_det;
     float3 r1 = cross(e3, e1) * inv_det;
     float3 r2 = cross(e1, e2) * inv_det;
 
-    // N-sample quadrature: samples at midpoints of N equal sub-segments
-    float sub_dt = dt / float(N_QUAD_SAMPLES);
-    float3 rgb = float3(0.f);
-    float total_tau = 0.f;
-    float T_accum = 1.0f;
-    float sigma_sum = 0.f;
+    // Evaluate attributes at entry and exit points
+    float3 p_enter = enter * ray.d + ray.o - g.tet.verts[0];
+    float3 p_exit  = exit  * ray.d + ray.o - g.tet.verts[0];
 
-    [ForceUnroll]
-    for (int s = 0; s < N_QUAD_SAMPLES; s++) {
-        float t_s = enter + (float(s) + 0.5f) * sub_dt;
-        float3 p_s = t_s * ray.d + ray.o - g.tet.verts[0];
+    float3 bary_enter = float3(dot(r0, p_enter), dot(r1, p_enter), dot(r2, p_enter));
+    float b0_enter = 1.0f - bary_enter.x - bary_enter.y - bary_enter.z;
+    float4 attr0 = b0_enter * g.v_sigma_rgb[0] + bary_enter.x * g.v_sigma_rgb[1]
+                  + bary_enter.y * g.v_sigma_rgb[2] + bary_enter.z * g.v_sigma_rgb[3];
 
-        float3 bary_123 = float3(dot(r0, p_s), dot(r1, p_s), dot(r2, p_s));
-        float bary_0 = 1.0f - bary_123.x - bary_123.y - bary_123.z;
+    float3 bary_exit = float3(dot(r0, p_exit), dot(r1, p_exit), dot(r2, p_exit));
+    float b0_exit = 1.0f - bary_exit.x - bary_exit.y - bary_exit.z;
+    float4 attr1 = b0_exit * g.v_sigma_rgb[0] + bary_exit.x * g.v_sigma_rgb[1]
+                  + bary_exit.y * g.v_sigma_rgb[2] + bary_exit.z * g.v_sigma_rgb[3];
 
-        float4 attr_s = bary_0 * g.v_sigma_rgb[0] + bary_123.x * g.v_sigma_rgb[1]
-                       + bary_123.y * g.v_sigma_rgb[2] + bary_123.z * g.v_sigma_rgb[3];
+    // Log-densities at entry and exit (attr.x is log-density)
+    float d0 = attr0.x;
+    float d1 = attr1.x;
+    float3 c0 = float3(attr0.y, attr0.z, attr0.w);
+    float3 c1 = float3(attr1.y, attr1.z, attr1.w);
 
-        float sigma_s = safe_exp(attr_s.x);
-        float3 color_s = float3(attr_s.y, attr_s.z, attr_s.w);
+    // ── IBP-Simpson integration ──
+    // Closed-form optical depth for log-linear density:
+    //   σ(s) = exp(d0 + s*(d1-d0)/dt)
+    //   τ = dt*(e^d1 - e^d0)/(d1 - d0)    [d1 ≠ d0]
+    //     = dt*e^d0                          [d1 = d0]
+    float delta = d1 - d0;
+    float ed0 = safe_exp(d0);
+    float ed  = safe_exp(delta);         // e^δ
+    float ed1 = ed0 * ed;               // e^{d₁}
 
-        float tau_s = sigma_s * sub_dt;
-        float alpha_s = max(-safe_expm1(-tau_s), 0.f);
-        rgb = rgb + T_accum * alpha_s * color_s;
-        T_accum = T_accum * safe_exp(-tau_s);
-        total_tau = total_tau + tau_s;
-        sigma_sum = sigma_sum + sigma_s;
+    float tau_total;
+    if (abs(delta) < 1e-6f) {
+        tau_total = dt * ed0;
+    } else {
+        tau_total = dt * (ed1 - ed0) / delta;
     }
 
-    float avg_sigma = sigma_sum / float(N_QUAD_SAMPLES);
-    float alpha_total = max(-safe_expm1(-total_tau), 0.f);
-    float3 rendered_norm = alpha_total * l2_normalize(enter_norm);
-    float depth = safe_div(compute_integral1D(enter, exit, total_tau), ray.ortho);
+    float exp_neg_tau = safe_exp(-tau_total);
+    float alpha = max(1.0f - exp_neg_tau, 0.f);
+
+    // Simpson's rule for I = ∫₀^dt T(s) ds using T(0), T(dt/2), T(dt)
+    // τ(dt/2) = τ_total / (e^{δ/2} + 1), and e^{δ/2} = √(e^δ)
+    float tau_mid;
+    if (abs(delta) < 1e-6f) {
+        tau_mid = tau_total * 0.5f;
+    } else {
+        float ed_half = sqrt(ed);        // e^{δ/2}
+        tau_mid = tau_total / (ed_half + 1.0f);
+    }
+    float T_mid = safe_exp(-tau_mid);
+    float T_end = 1.0f - alpha;
+
+    // I/dt = (T(0) + 4*T(dt/2) + T(dt)) / 6 = (1 + 4*T_mid + T_end) / 6
+    float I_over_dt = (1.0f + 4.0f * T_mid + T_end) / 6.0f;
+
+    // IBP decomposition: C = c₀·α + (c₁-c₀)·[I/dt - (1-α)]
+    float weight = I_over_dt - T_end;
+    float3 rgb = c0 * alpha + (c1 - c0) * weight;
+
+    float avg_sigma = (ed0 + ed1) * 0.5f;
+    float3 rendered_norm = alpha * l2_normalize(enter_norm);
+    float depth = safe_div(compute_integral1D(enter, exit, tau_total), ray.ortho);
 
     CtrlPt result;
-    result.rgba = float4(rgb, total_tau);
+    result.rgba = float4(rgb, tau_total);
     result.dist = float2(enter, exit);
     result.density = avg_sigma;
     result.xyzd = float4(rendered_norm, depth);
