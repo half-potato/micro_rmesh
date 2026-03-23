@@ -100,9 +100,9 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings
-args.decimate_start = 150
-args.decimate_end = 500
+# Decimation Settings — only after densification
+args.decimate_start = 450
+args.decimate_end = 700
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 1  # no upfront densification — testing refinement-based
+init_upsample = 4  # 4x upfront then error-targeted densification at step 400
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]
@@ -198,11 +198,11 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    do_cloning = False
+    # Error-targeted densification: one big round at step 400
+    do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_grad_densify = False
-    # Refinement-based densification: fix bad tets early, then stop
-    do_refine = (step > 0 and step % 100 == 0 and step <= 400
-                 and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    # Refinement after densification to clean up
+    do_refine = (step in [500, 600] and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = (step >= args.decimate_start and step < args.decimate_end
@@ -323,7 +323,7 @@ while True:
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 50000)
+            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 200000)
 
             apply_densification(
                 stats,
