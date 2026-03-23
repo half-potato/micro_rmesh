@@ -33,23 +33,29 @@ def build_edge_list(indices):
 
 @torch.no_grad()
 def query_tet_rgb(model):
-    """Query backbone at circumcenters to get per-tet RGB.
+    """Get per-tet RGB. Works with both SimpleModel and VertexModel.
 
     Returns:
         (T, 3) float tensor of RGB values.
     """
-    vertices = model.vertices
-    indices = model.indices
-    T = indices.shape[0]
-    chunk = 50000
-    rgbs = []
-    for start in range(0, T, chunk):
-        end = min(start + chunk, T)
-        _, density, rgb, grd, sh, *rest = model.compute_batch_features(
-            vertices, indices, start, end)
-        rgbs.append(rgb.float())
-        del density, grd, sh
-    return torch.cat(rgbs, dim=0)
+    if hasattr(model, 'compute_batch_features'):
+        # SimpleModel path
+        vertices = model.vertices
+        indices = model.indices
+        T = indices.shape[0]
+        chunk = 50000
+        rgbs = []
+        for start in range(0, T, chunk):
+            end = min(start + chunk, T)
+            _, density, rgb, grd, sh, *rest = model.compute_batch_features(
+                vertices, indices, start, end)
+            rgbs.append(rgb.float())
+            del density, grd, sh
+        return torch.cat(rgbs, dim=0)
+    else:
+        # VertexModel path: average vertex RGB per tet
+        indices = model.indices.long()
+        return model.rgb.data[indices].float().mean(dim=1)
 
 
 @torch.no_grad()

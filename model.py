@@ -2479,6 +2479,26 @@ class VertexOptimizer:
         return k
 
     @torch.no_grad()
+    def remove_points(self, keep_mask: torch.Tensor):
+        """Remove vertices by boolean mask. Prunes optimizer state and retriangulates."""
+        model = self.model
+        keep_mask = keep_mask[:model.interior_vertices.shape[0]]
+
+        # Prune vertex positions (with optimizer state)
+        model.interior_vertices = self.vertex_optim.prune_optimizer(keep_mask)[
+            "interior_vertices"
+        ]
+
+        # Prune per-vertex attributes
+        model.sigma = nn.Parameter(model.sigma.data[keep_mask].contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(model.rgb.data[keep_mask].contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(model.sh.data[keep_mask].contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+    @torch.no_grad()
     def add_vertices_midpoint(self, edges: torch.Tensor):
         """Add vertices at edge midpoints with averaged endpoint attributes.
 

@@ -100,10 +100,10 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings
-args.decimate_start = 99999
+# Decimation Settings — runs alongside refinement
+args.decimate_start = 150
 args.decimate_end = 99999
-args.decimate_interval = 99999
+args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
 
@@ -205,7 +205,7 @@ while True:
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
-    do_decimation = step in dschedule_decimate
+    do_decimation = (step >= args.decimate_start and step % args.decimate_interval == 0)
 
     if do_delaunay:
         # Measure PSNR before retriangulation
