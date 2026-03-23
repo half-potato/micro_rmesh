@@ -324,9 +324,9 @@ while True:
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 200000)
+            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 50000)
 
-            apply_vertex_densification(
+            apply_densification(
                 stats,
                 model       = model,
                 tet_optim   = tet_optim,
