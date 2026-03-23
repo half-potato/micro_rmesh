@@ -253,6 +253,68 @@ def apply_densification(
 
 
 @torch.no_grad()
+def apply_vertex_densification(
+    stats: RenderStats,
+    model,
+    tet_optim,
+    args,
+    device: torch.device,
+    target_addition: int,
+):
+    """Vertex-error-based densification for VertexModel.
+
+    Converts per-tet error to per-vertex error, then adds new vertices
+    near the highest-error vertices by splitting their longest edges.
+    """
+    from utils.decimation import build_edge_list
+
+    # 1. Compute per-tet error (same as apply_densification)
+    s0_t, s1_t, s2_t = stats.total_var_moments.T
+    total_var_mu = safe_math.safe_div(s1_t, s0_t)
+    total_var_std = (safe_math.safe_div(s2_t, s0_t) - total_var_mu**2).clip(min=0)
+    total_var_std[s0_t < 1] = 0
+    tet_error = s0_t * total_var_std
+    tet_error[stats.tet_view_count < 2] = 0
+    tet_error[stats.peak_contrib < args.clone_min_contrib] = 0
+
+    # 2. Scatter tet error to vertices (max of adjacent tets)
+    indices = model.indices.long()
+    V = model.vertices.shape[0]
+    n_int = model.num_int_verts
+    vertex_error = torch.zeros(V, device=device)
+    for corner in range(4):
+        vertex_error.scatter_reduce_(0, indices[:, corner], tet_error, reduce='amax')
+    # Only interior vertices
+    vertex_error[n_int:] = 0
+
+    # 3. Build edges, score by max endpoint error
+    edges = build_edge_list(model.indices)
+    int_mask = (edges[:, 0] < n_int) & (edges[:, 1] < n_int)
+    edge_error = torch.zeros(edges.shape[0], device=device)
+    edge_error[int_mask] = torch.maximum(
+        vertex_error[edges[int_mask, 0]],
+        vertex_error[edges[int_mask, 1]])
+
+    # 4. Select top-k edges by error, weighted by edge length (prefer splitting longer edges)
+    verts = model.vertices
+    edge_len = (verts[edges[:, 0]] - verts[edges[:, 1]]).norm(dim=1)
+    edge_score = edge_error * edge_len  # error * length: split long edges near high-error vertices
+
+    k = min(target_addition, int(int_mask.sum().item()))
+    if k <= 0:
+        return
+    _, top_idx = edge_score.topk(k)
+    edges_to_split = edges[top_idx]
+
+    n_selected = edges_to_split.shape[0]
+    print(f"Vertex-error densification: splitting {n_selected} edges "
+          f"(error range: {edge_error[top_idx].min():.4f} - {edge_error[top_idx].max():.4f})")
+
+    # 5. Split edges at midpoints with averaged attributes + Delaunay
+    tet_optim.add_vertices_midpoint(edges_to_split)
+
+
+@torch.no_grad()
 def apply_grad_densification(
     model,
     tet_optim,

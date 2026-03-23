@@ -21,7 +21,7 @@ from utils.args import Args
 import json
 import test_util
 import gc
-from utils.densification import collect_render_stats, apply_densification, apply_grad_densification
+from utils.densification import collect_render_stats, apply_densification, apply_grad_densification, apply_vertex_densification
 from utils.decimation import apply_decimation
 
 
@@ -201,7 +201,7 @@ while True:
     # Error-targeted densification + refine/decimate cleanup
     do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_grad_densify = False
-    # Refine+decimate after densification to improve mesh quality
+    # Refine+decimate after densification
     do_refine = (step in [500, 600]
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
@@ -326,7 +326,7 @@ while True:
             model.train()
             target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 200000)
 
-            apply_densification(
+            apply_vertex_densification(
                 stats,
                 model       = model,
                 tet_optim   = tet_optim,
