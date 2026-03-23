@@ -130,6 +130,8 @@ def compute_edge_scores(edges, indices, vertices, tet_rgb, n_interior):
         vertices[edges[:, 0]] - vertices[edges[:, 1]], dim=1)
 
     # --- 4. Score ---
+    # Lower score = collapse first.
+    # Short edges in uniform, low-density regions are safest to remove.
     eps = 1e-3
     scores = edge_lengths / (rgb_std + eps)
 
@@ -165,6 +167,16 @@ def apply_decimation(model, tet_optim, args, device):
     n_interior = model.num_int_verts
     scores = compute_edge_scores(
         edges, model.indices, model.vertices, tet_rgb, n_interior)
+
+    # 2b. Density weighting for VertexModel: protect high-density edges
+    if hasattr(model, 'sigma'):
+        sigma = model.sigma.data.squeeze()  # (V,)
+        # Average density at edge endpoints (in log-space)
+        edge_density = (sigma[edges[:, 0]] + sigma[edges[:, 1]]) / 2
+        # Convert to linear density and scale scores
+        # High density = high score = protected from collapse
+        density_weight = torch.exp(edge_density.clamp(max=5))  # clamp to avoid overflow
+        scores = scores * density_weight
 
     # 3. Select candidates by threshold or top-k
     threshold = getattr(args, 'decimate_threshold', 0.0)

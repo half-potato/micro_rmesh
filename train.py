@@ -100,9 +100,9 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings — runs alongside refinement
+# Decimation Settings
 args.decimate_start = 150
-args.decimate_end = 99999
+args.decimate_end = 500
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -200,12 +200,13 @@ while True:
     do_delaunay = False
     do_cloning = False
     do_grad_densify = False
-    # Refinement-based densification: fix bad tets by inserting vertices
-    do_refine = (step > 0 and step % 100 == 0
+    # Refinement-based densification: fix bad tets early, then stop
+    do_refine = (step > 0 and step % 100 == 0 and step <= 400
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
-    do_decimation = (step >= args.decimate_start and step % args.decimate_interval == 0)
+    do_decimation = (step >= args.decimate_start and step < args.decimate_end
+                     and step % args.decimate_interval == 0)
 
     if do_delaunay:
         # Measure PSNR before retriangulation
