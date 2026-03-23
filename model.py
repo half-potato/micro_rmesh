@@ -2343,15 +2343,18 @@ class VertexOptimizer:
 
     @torch.no_grad()
     def refine_bad_tets(self, max_vertices: int = 5000, quality_threshold: float = 0.0):
-        """Refinement-based densification: insert vertices at centroids of worst-quality tets.
+        """Constrained Delaunay-style refinement: insert at circumcenters of bad tets.
 
-        Quality metric: volume / (max_edge_length^3). Low = sliver/degenerate.
-        New vertex attributes are averaged from the 4 corners (= exact barycentric interp
-        at centroid), so the rendered field is minimally disrupted.
+        Quality metric: radius-edge ratio (circumradius / min_edge_length).
+        High = bad tet (sliver). Standard Delaunay refinement criterion.
+
+        Inserting at circumcenter is guaranteed to eliminate the bad tet from
+        the Delaunay triangulation. Attributes are barycentric-interpolated
+        at the circumcenter to preserve the rendered field.
 
         Args:
             max_vertices: maximum number of vertices to add per round
-            quality_threshold: only refine tets with quality below this (0 = use top-k worst)
+            quality_threshold: only refine tets with ratio above this (0 = use top-k worst)
         Returns:
             number of vertices added
         """
@@ -2361,70 +2364,102 @@ class VertexOptimizer:
         n_int = model.num_int_verts
         T = indices.shape[0]
 
-        # Compute tet quality: volume / max_edge_length^3
         p = verts[indices]  # (T, 4, 3)
-        e1 = p[:, 1] - p[:, 0]
-        e2 = p[:, 2] - p[:, 0]
-        e3 = p[:, 3] - p[:, 0]
-        vol = torch.abs(torch.sum(e1 * torch.cross(e2, e3, dim=1), dim=1)) / 6.0
 
+        # Circumcenter and circumradius
+        cc, circumradius = calculate_circumcenters_torch(p.double())
+        cc = cc.float()
+        circumradius = circumradius.float()
+
+        # Min edge length per tet
         edges_pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
-        max_el = torch.zeros(T, device=verts.device)
+        min_el = torch.full((T,), float('inf'), device=verts.device)
         for i, j in edges_pairs:
             el = (p[:, i] - p[:, j]).norm(dim=1)
-            max_el = torch.maximum(max_el, el)
+            min_el = torch.minimum(min_el, el)
 
-        quality = vol / (max_el.pow(3) + 1e-12)
+        # Radius-edge ratio (higher = worse quality)
+        ratio = circumradius / (min_el + 1e-12)
 
         # Only refine tets where all vertices are interior
         all_interior = (indices < n_int).all(dim=1)
-        quality[~all_interior] = float('inf')
+        ratio[~all_interior] = 0  # never refine exterior tets
 
-        # Skip extremely degenerate tets — inserting centroids there creates
-        # near-coplanar vertices that crash gDel3D
-        too_degenerate = quality < 1e-6
-        quality[too_degenerate] = float('inf')
+        # Skip tets where circumcenter is very far from centroid
+        # (degenerate tets have circumcenters at infinity)
+        centroid = p.mean(dim=1)
+        cc_dist = (cc - centroid).norm(dim=1)
+        max_cc_dist = min_el * 5  # circumcenter shouldn't be more than 5x min edge away
+        ratio[cc_dist > max_cc_dist] = 0
 
-        # Select worst tets
+        # Select worst tets (highest ratio)
         if quality_threshold > 0:
-            bad_mask = quality < quality_threshold
+            bad_mask = ratio > quality_threshold
             bad_idx = bad_mask.nonzero().squeeze(-1)
         else:
             bad_idx = torch.arange(T, device=verts.device)[all_interior]
 
-        bad_quality = quality[bad_idx]
-        sort_order = bad_quality.argsort()
+        bad_ratio = ratio[bad_idx]
+        sort_order = bad_ratio.argsort(descending=True)
         k = min(max_vertices, sort_order.shape[0])
         selected = bad_idx[sort_order[:k]]
 
+        # Filter zero-ratio (excluded) tets
+        selected = selected[ratio[selected] > 0]
+        k = selected.shape[0]
         if k == 0:
             return 0
 
-        sel_verts = indices[selected]
-        centroids = verts[sel_verts].float().mean(dim=1)
+        sel_verts = indices[selected]  # (K, 4)
+        insert_pts = cc[selected]  # circumcenters
 
-        # Filter out centroids too close to existing vertices (prevents gDel3D crashes)
-        min_dist_sq = 1e-4  # minimum spacing squared
+        # Barycentric interpolation at circumcenter for attribute initialization
+        # Solve: point = b0*v0 + b1*v1 + b2*v2 + b3*v3, sum(b)=1
+        # Using the standard tet barycentric formula via sub-volumes
+        v0, v1, v2, v3 = p[selected, 0], p[selected, 1], p[selected, 2], p[selected, 3]
+        def tet_vol_signed(a, b, c, d):
+            return torch.sum((b - a) * torch.cross(c - a, d - a, dim=1), dim=1)
+
+        vol_total = tet_vol_signed(v0, v1, v2, v3).unsqueeze(1)  # (K, 1)
+        b0 = tet_vol_signed(insert_pts, v1, v2, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b1 = tet_vol_signed(v0, insert_pts, v2, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b2 = tet_vol_signed(v0, v1, insert_pts, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b3 = 1.0 - b0 - b1 - b2  # (K, 1)
+
+        # Clamp barycentric coords — circumcenter can be outside the tet
+        # If so, fall back to centroid (b=0.25 each)
+        bary = torch.cat([b0, b1, b2, b3], dim=1)  # (K, 4)
+        outside = (bary < -0.1).any(dim=1) | (bary > 1.1).any(dim=1)
+        bary[outside] = 0.25
+        insert_pts[outside] = p[selected[outside]].mean(dim=1)  # use centroid instead
+
+        # Filter out points too close to existing vertices
+        min_dist_sq = 1e-4
         existing = verts.detach()
-        keep = torch.ones(centroids.shape[0], dtype=torch.bool, device=verts.device)
+        keep = torch.ones(k, dtype=torch.bool, device=verts.device)
         chunk = 2048
-        for s in range(0, centroids.shape[0], chunk):
-            e = min(s + chunk, centroids.shape[0])
-            d = (centroids[s:e].unsqueeze(1) - existing.unsqueeze(0)).pow(2).sum(-1).min(dim=1).values
+        for s in range(0, k, chunk):
+            e = min(s + chunk, k)
+            d = (insert_pts[s:e].unsqueeze(1) - existing.unsqueeze(0)).pow(2).sum(-1).min(dim=1).values
             keep[s:e] = d > min_dist_sq
         selected = selected[keep]
         sel_verts = indices[selected]
-        centroids = centroids[keep]
-        k = centroids.shape[0]
+        insert_pts = insert_pts[keep]
+        bary = bary[keep]
+        k = insert_pts.shape[0]
         if k == 0:
             return 0
 
-        new_sigma = model.sigma.data[sel_verts].mean(dim=1)
-        new_rgb = model.rgb.data[sel_verts].mean(dim=1)
-        new_sh = model.sh.data[sel_verts].mean(dim=1)
+        # Interpolate attributes using barycentric weights
+        bary_expanded = bary  # (K, 4)
+        new_sigma = (model.sigma.data[sel_verts] * bary_expanded.unsqueeze(-1)).sum(dim=1)
+        new_rgb = (model.rgb.data[sel_verts] * bary_expanded.unsqueeze(-1)).sum(dim=1)
+        # For SH: need to handle the extra dimension
+        sh_data = model.sh.data[sel_verts]  # (K, 4, sh_dim//3, 3)
+        new_sh = (sh_data * bary_expanded.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
 
         model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
-            dict(interior_vertices=centroids)
+            dict(interior_vertices=insert_pts)
         )["interior_vertices"]
         model.sigma = nn.Parameter(
             torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
@@ -2437,8 +2472,9 @@ class VertexOptimizer:
         model.update_triangulation()
         model.device = model.sigma.device
 
-        avg_q = quality[selected].mean().item()
-        print(f"Refined {k} bad tets (avg quality={avg_q:.6f}) "
+        avg_r = ratio[selected].mean().item()
+        n_cc = (~outside[keep]).sum().item()
+        print(f"Refined {k} tets (avg ratio={avg_r:.2f}, {n_cc} circumcenter/{k-n_cc} centroid) "
               f"(#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
         return k
 
