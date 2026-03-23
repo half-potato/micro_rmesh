@@ -185,8 +185,58 @@ Goals: Improve densification and retriangulation. Break through the 51k vertex c
   4. **tile_size=16 is strictly better** — 14x smaller index buffer, faster per step, 6x less VRAM
   5. **The model is capacity-limited** — 4x vertices = +0.84 dB with room to scale further
   6. **Vertex spacing** — offsets < 0.01 create degenerate tets (NaN)
+### Investigation 4: Quantifying retriangulation disruption
+
+**Question**: How much does a single Delaunay retriangulation actually hurt PSNR?
+
+**Method**: Measured PSNR on the same camera view immediately before and after `update_triangulation()`, every 300 steps.
+
+| Step | PSNR drop | Note |
+|---|---|---|
+| 300 | **-2.14** | Early, vertices not settled |
+| 600 | -0.60 | |
+| 900 | -0.08 | Nearly harmless |
+| 1200 | -1.19 | Vertices drifted |
+| 1500 | -0.11 | |
+| 3000 | -1.51 | Late, delicate field |
+
+**Discovery**: Disruption is NOT monotonically decreasing — it spikes when vertices have drifted from Delaunay-optimal positions. The issue is topology change, not compute cost (Delaunay takes 0.09-0.17s).
+
+### Investigation 5: Refinement-based densification (BREAKTHROUGH)
+
+**Question**: Can we densify by inserting vertices that FIX bad tets, rather than global retriangulation?
+
+**Hypothesis**: Inserting a vertex at a bad tet's centroid with interpolated attributes should (a) break the bad tet into better-conditioned ones, (b) barely change the rendered field since the new vertex's value equals the interpolated value at that point.
+
+**Method**: `refine_bad_tets()` — quality metric = volume / max_edge_length^3. Select worst tets, insert centroids with averaged attributes, retriangulate. Every 100 steps, 5k vertices per round.
+
+**Results**: 16 refinement rounds, 51k → 121k vertices:
+
+| Metric | Global Delaunay (step 300) | Refinement (avg of 16 rounds) |
+|---|---|---|
+| PSNR disruption | **-2.14 dB** | **-0.08 dB** |
+
+Refinement is **25x less disruptive**. Some rounds actually **improved** PSNR (+0.13, +0.03, +0.12, +0.02). The interpolated-attribute initialization means the field is nearly preserved.
+
+**Crash**: gDel3D OOM at 121k vertices during GPU Delaunay. Fix: fall back to scipy CPU Delaunay for large meshes.
+
+**Discovery**: Refinement-based densification is the right approach. It simultaneously:
+1. Adds model capacity (more vertices)
+2. Improves mesh quality (fixes degenerate tets)
+3. Preserves the learned field (interpolated initialization)
+
+### Updated end-of-shift summary
+
+- **Best PSNR**: 20.77 (8x upfront + tile_size=16, 411k vertices)
+- **Improvement**: +1.0 dB over previous best, +2.34 dB over original baseline (18.43)
+- **Key discoveries**:
+  1. **tile_size=4 was the VRAM bottleneck** — O(T*tiles/tet) index buffer. tile_size=16 is 10x cheaper and faster
+  2. **Retriangulation disrupts the field by -0.08 to -2.14 dB** depending on training stage
+  3. **Refinement-based densification is 25x less disruptive** than global Delaunay — insert vertices at bad tet centroids with interpolated attributes
+  4. **The model is strongly capacity-limited** — more vertices = better PSNR, up to GPU limits
+  5. **gDel3D OOM** at ~121k vertices during refinement — need CPU fallback
 - **Open questions for next shift**:
-  - Scale to 500k+ vertices (10x+) — the VRAM headroom now exists
-  - What's the PSNR ceiling with unlimited vertices? Are we training-time-limited at 500k?
-  - Can we use even larger tiles (32x32) for further scaling?
-  - Would the evaluation harness need tile_size=16 too? (test_util.py is read-only)
+  - Combine refinement + tile_size=16 to scale refinement to 500k vertices
+  - Fall back to scipy.spatial.Delaunay for large meshes (avoid gDel3D OOM)
+  - Tune refinement schedule: batch size, frequency, quality threshold
+  - Add error-based targeting: refine tets that have high rendering error, not just bad geometry
