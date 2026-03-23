@@ -290,30 +290,41 @@ inline CtrlPt integrate_tetra_segment_vertex(
     // ── IBP-Simpson integration ──
     // Closed-form optical depth for log-linear density:
     //   σ(s) = exp(d0 + s*(d1-d0)/dt)
-    //   τ = dt*(e^d1 - e^d0)/(d1 - d0)    [d1 ≠ d0]
-    //     = dt*e^d0                          [d1 = d0]
+    //   τ = dt*e^d0*(e^δ - 1)/δ    where δ = d1-d0
+    //
+    // For small δ, use Taylor: (e^δ-1)/δ = 1 + δ/2 + δ²/6 + δ³/24
+    // This avoids catastrophic cancellation in (e^δ - 1)/δ.
     float delta = d1 - d0;
-    float ed0 = safe_exp(d0);
-    float ed  = safe_exp(delta);         // e^δ
-    float ed1 = ed0 * ed;               // e^{d₁}
+    // Clamp log-densities to prevent overflow in exp
+    float d0_c = clamp(d0, -20.f, 20.f);
+    float d1_c = clamp(d1, -20.f, 20.f);
+    float delta_c = d1_c - d0_c;
+    float ed0 = safe_exp(d0_c);
 
-    float tau_total;
-    if (abs(delta) < 1e-6f) {
-        tau_total = dt * ed0;
+    // (e^δ - 1)/δ with Taylor expansion for small δ
+    float expm1_over_delta;
+    float ed;  // e^δ
+    if (abs(delta_c) < 0.01f) {
+        // Taylor: 1 + δ/2 + δ²/6 + δ³/24
+        float d = delta_c;
+        expm1_over_delta = 1.0f + d * (0.5f + d * (1.0f/6.0f + d * (1.0f/24.0f)));
+        ed = 1.0f + d * expm1_over_delta;  // e^δ ≈ 1 + δ*(e^δ-1)/δ
     } else {
-        tau_total = dt * (ed1 - ed0) / delta;
+        ed = safe_exp(delta_c);
+        expm1_over_delta = (ed - 1.0f) / delta_c;
     }
 
+    float tau_total = max(dt * ed0 * expm1_over_delta, 0.f);
     float exp_neg_tau = safe_exp(-tau_total);
     float alpha = max(1.0f - exp_neg_tau, 0.f);
 
     // Simpson's rule for I = ∫₀^dt T(s) ds using T(0), T(dt/2), T(dt)
     // τ(dt/2) = τ_total / (e^{δ/2} + 1), and e^{δ/2} = √(e^δ)
     float tau_mid;
-    if (abs(delta) < 1e-6f) {
+    if (abs(delta_c) < 0.01f) {
         tau_mid = tau_total * 0.5f;
     } else {
-        float ed_half = sqrt(ed);        // e^{δ/2}
+        float ed_half = sqrt(max(ed, 0.f));  // e^{δ/2}
         tau_mid = tau_total / (ed_half + 1.0f);
     }
     float T_mid = safe_exp(-tau_mid);
@@ -326,6 +337,7 @@ inline CtrlPt integrate_tetra_segment_vertex(
     float weight = I_over_dt - T_end;
     float3 rgb = c0 * alpha + (c1 - c0) * weight;
 
+    float ed1 = ed0 * ed;
     float avg_sigma = (ed0 + ed1) * 0.5f;
     float3 rendered_norm = alpha * l2_normalize(enter_norm);
     float depth = safe_div(compute_integral1D(enter, exit, tau_total), ray.ortho);
