@@ -2342,6 +2342,102 @@ class VertexOptimizer:
         print(f"Split {K} tets (averaged attrs) (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
 
     @torch.no_grad()
+    def refine_bad_tets(self, max_vertices: int = 5000, quality_threshold: float = 0.0):
+        """Refinement-based densification: insert vertices at centroids of worst-quality tets.
+
+        Quality metric: volume / (max_edge_length^3). Low = sliver/degenerate.
+        New vertex attributes are averaged from the 4 corners (= exact barycentric interp
+        at centroid), so the rendered field is minimally disrupted.
+
+        Args:
+            max_vertices: maximum number of vertices to add per round
+            quality_threshold: only refine tets with quality below this (0 = use top-k worst)
+        Returns:
+            number of vertices added
+        """
+        model = self.model
+        indices = model.indices.long()
+        verts = model.vertices
+        n_int = model.num_int_verts
+        T = indices.shape[0]
+
+        # Compute tet quality: volume / max_edge_length^3
+        p = verts[indices]  # (T, 4, 3)
+        e1 = p[:, 1] - p[:, 0]
+        e2 = p[:, 2] - p[:, 0]
+        e3 = p[:, 3] - p[:, 0]
+        vol = torch.abs(torch.sum(e1 * torch.cross(e2, e3, dim=1), dim=1)) / 6.0
+
+        edges_pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+        max_el = torch.zeros(T, device=verts.device)
+        for i, j in edges_pairs:
+            el = (p[:, i] - p[:, j]).norm(dim=1)
+            max_el = torch.maximum(max_el, el)
+
+        quality = vol / (max_el.pow(3) + 1e-12)
+
+        # Only refine tets where all vertices are interior
+        all_interior = (indices < n_int).all(dim=1)
+        quality[~all_interior] = float('inf')
+
+        # Select worst tets
+        if quality_threshold > 0:
+            bad_mask = quality < quality_threshold
+            bad_idx = bad_mask.nonzero().squeeze(-1)
+        else:
+            bad_idx = torch.arange(T, device=verts.device)[all_interior]
+
+        bad_quality = quality[bad_idx]
+        sort_order = bad_quality.argsort()
+        k = min(max_vertices, sort_order.shape[0])
+        selected = bad_idx[sort_order[:k]]
+
+        if k == 0:
+            return 0
+
+        sel_verts = indices[selected]
+        centroids = verts[sel_verts].float().mean(dim=1)
+
+        # Filter out centroids too close to existing vertices (prevents gDel3D crashes)
+        min_dist_sq = 1e-4  # minimum spacing squared
+        existing = verts.detach()
+        keep = torch.ones(centroids.shape[0], dtype=torch.bool, device=verts.device)
+        chunk = 2048
+        for s in range(0, centroids.shape[0], chunk):
+            e = min(s + chunk, centroids.shape[0])
+            d = (centroids[s:e].unsqueeze(1) - existing.unsqueeze(0)).pow(2).sum(-1).min(dim=1).values
+            keep[s:e] = d > min_dist_sq
+        selected = selected[keep]
+        sel_verts = indices[selected]
+        centroids = centroids[keep]
+        k = centroids.shape[0]
+        if k == 0:
+            return 0
+
+        new_sigma = model.sigma.data[sel_verts].mean(dim=1)
+        new_rgb = model.rgb.data[sel_verts].mean(dim=1)
+        new_sh = model.sh.data[sel_verts].mean(dim=1)
+
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=centroids)
+        )["interior_vertices"]
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+        avg_q = quality[selected].mean().item()
+        print(f"Refined {k} bad tets (avg quality={avg_q:.6f}) "
+              f"(#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+        return k
+
+    @torch.no_grad()
     def add_vertices_midpoint(self, edges: torch.Tensor):
         """Add vertices at edge midpoints with averaged endpoint attributes.
 

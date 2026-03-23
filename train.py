@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 8  # 8x: 20.77 PSNR, 411k verts, 694MB VRAM
+init_upsample = 1  # no upfront densification — testing refinement-based
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]
@@ -199,19 +199,37 @@ while True:
     t0 = time.time()
     do_delaunay = False
     do_cloning = False
-    do_grad_densify = (step >= densify_grad_start and step < densify_grad_end
-                       and step % densify_grad_interval == 0 and step > 0)
+    do_grad_densify = False
+    # Refinement-based densification: fix bad tets by inserting vertices
+    do_refine = (step > 0 and step % 100 == 0
+                 and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = step in dschedule_decimate
 
     if do_delaunay:
+        # Measure PSNR before retriangulation
+        with torch.no_grad():
+            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            pre_img = pre_render['render']
+            pre_l2 = ((target - pre_img)**2 * gt_mask).mean()
+            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+        old_n_tets = model.indices.shape[0]
         st = time.time()
-        # tet_optim.undo_useless_splits(threshold=0.01)
         tet_optim.update_triangulation(
             density_threshold=args.density_threshold if step > args.threshold_start else 0,
             alpha_threshold=args.alpha_threshold if step > args.threshold_start else 0,
             high_precision=False)
+        # Measure PSNR after retriangulation
+        with torch.no_grad():
+            post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            post_img = post_render['render']
+            post_l2 = ((target - post_img)**2 * gt_mask).mean()
+            post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
+        new_n_tets = model.indices.shape[0]
+        dt_del = time.time() - st
+        print(f"[DELAUNAY step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) "
+              f"tets: {old_n_tets} -> {new_n_tets} time={dt_del:.2f}s")
 
     if len(inds) == 0:
         print(f"TRAIN PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
@@ -318,9 +336,26 @@ while True:
             gc.collect()
             torch.cuda.empty_cache()
 
+    if do_refine:
+        with torch.no_grad():
+            # Measure PSNR impact of refinement
+            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            pre_l2 = ((target - pre_render['render'])**2 * gt_mask).mean()
+            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+
+            budget_left = test_util.VERT_BUDGET - model.vertices.shape[0]
+            n_add = min(5000, budget_left)
+            if n_add > 0:
+                added = tet_optim.refine_bad_tets(max_vertices=n_add)
+
+                post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+                post_l2 = ((target - post_render['render'])**2 * gt_mask).mean()
+                post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
+                print(f"  [REFINE step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f})")
+
     if do_grad_densify:
         with torch.no_grad():
-            target = min(densify_grad_target, test_util.VERT_BUDGET - model.vertices.shape[0])
+            target = min(50000, test_util.VERT_BUDGET - model.vertices.shape[0])
             if target > 0:
                 apply_grad_densification(
                     model, tet_optim, grad_accum, grad_count,
