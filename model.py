@@ -2342,6 +2342,81 @@ class VertexOptimizer:
         print(f"Split {K} tets (averaged attrs) (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
 
     @torch.no_grad()
+    def split_tets_no_delaunay(self, split_mask):
+        """1-to-4 inplace tet split WITHOUT retriangulation.
+
+        For each selected tet (v0,v1,v2,v3), insert centroid vertex vc and replace
+        the parent tet with 4 sub-tets:
+            (vc,v1,v2,v3), (v0,vc,v2,v3), (v0,v1,vc,v3), (v0,v1,v2,vc)
+
+        Centroid attributes = average of 4 corners = exact barycentric interpolation.
+        This is zero-disruption: the rendered field is identical before and after.
+        """
+        model = self.model
+        split_idx = torch.where(split_mask)[0]
+        K = split_idx.shape[0]
+        if K == 0:
+            return 0
+
+        split_tet_verts = model.indices[split_idx].long()  # (K, 4)
+        verts = model.vertices
+        V_old = verts.shape[0]
+        n_int_old = model.interior_vertices.shape[0]
+
+        # Centroid positions and averaged attributes
+        centroids = verts[split_tet_verts].float().mean(dim=1)  # (K, 3)
+        new_sigma = model.sigma.data[split_tet_verts].mean(dim=1)
+        new_rgb = model.rgb.data[split_tet_verts].mean(dim=1)
+        new_sh = model.sh.data[split_tet_verts].mean(dim=1)
+
+        # Extend vertex positions via optimizer
+        model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+            dict(interior_vertices=centroids)
+        )["interior_vertices"]
+
+        # Extend per-vertex params
+        model.sigma = nn.Parameter(
+            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
+        model.rgb = nn.Parameter(
+            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
+        model.sh = nn.Parameter(
+            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+
+        # Build new index buffer: replace each parent tet with 4 sub-tets
+        # Centroid indices: V_old + 0, V_old + 1, ..., V_old + K-1
+        # But since we're appending to interior_vertices, centroid index = n_int_old + k
+        centroid_idx = torch.arange(K, device=model.device, dtype=torch.long) + n_int_old
+
+        v0 = split_tet_verts[:, 0]
+        v1 = split_tet_verts[:, 1]
+        v2 = split_tet_verts[:, 2]
+        v3 = split_tet_verts[:, 3]
+        vc = centroid_idx
+
+        # 4 sub-tets per parent: replace vertex i with vc
+        sub0 = torch.stack([vc, v1, v2, v3], dim=1)  # v0 → vc
+        sub1 = torch.stack([v0, vc, v2, v3], dim=1)  # v1 → vc
+        sub2 = torch.stack([v0, v1, vc, v3], dim=1)  # v2 → vc
+        sub3 = torch.stack([v0, v1, v2, vc], dim=1)  # v3 → vc
+
+        new_tets = torch.cat([sub0, sub1, sub2, sub3], dim=0).int()  # (4K, 4)
+
+        # Remove parent tets and append sub-tets
+        keep_mask = torch.ones(model.indices.shape[0], dtype=torch.bool, device=model.device)
+        keep_mask[split_idx] = False
+        kept_indices = model.indices[keep_mask]
+
+        model.indices = torch.cat([kept_indices, new_tets], dim=0).contiguous()
+        model.empty_indices = torch.empty((0, 4), dtype=model.indices.dtype, device='cuda')
+
+        self._rebuild_attr_optim()
+        model.device = model.sigma.device
+
+        print(f"1-to-4 split {K} tets (no Delaunay): "
+              f"#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]}")
+        return K
+
+    @torch.no_grad()
     def refine_bad_tets(self, max_vertices: int = 5000, quality_threshold: float = 0.0):
         """Constrained Delaunay-style refinement: insert at circumcenters of bad tets.
 

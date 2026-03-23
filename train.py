@@ -198,10 +198,10 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    # Error-targeted densification: one round at step 400
+    # Error-targeted densification + refine/decimate cleanup
     do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_grad_densify = False
-    # Refinement after densification to clean up
+    # Refine+decimate after densification to improve mesh quality
     do_refine = (step in [500, 600]
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
