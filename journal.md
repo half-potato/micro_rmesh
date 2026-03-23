@@ -240,3 +240,15 @@ Refinement is **25x less disruptive**. Some rounds actually **improved** PSNR (+
   - Fall back to scipy.spatial.Delaunay for large meshes (avoid gDel3D OOM)
   - Tune refinement schedule: batch size, frequency, quality threshold
   - Add error-based targeting: refine tets that have high rendering error, not just bad geometry
+
+### Investigation 6: Refine + Decimate cycle
+
+**Question**: Can we use decimation to remove useless vertices added by refinement, keeping mesh size constant while improving quality?
+
+**Method**: Refine 5k bad tets every 100 steps, decimate 5k edges every 100 steps (offset by 50). Net vertex change ~0 per cycle.
+
+**Results**: 16.82 PSNR (vs 19.77 baseline) — 71 retriangulations in 3600 steps destroyed learning.
+
+**Discovery**: The refine+decimate pipeline works mechanically — mesh quality improved (radius-edge ratio 8.6→4.2), vertex count stable at ~57k. But **71 topology changes is too many**. Even at -0.03 dB per change, cumulative disruption prevents convergence. The model never gets to settle into any topology long enough to learn good colors.
+
+**Implication**: Refine+decimate should be done in bulk early (a few big passes), then stopped. Or at much lower frequency (every 500+ steps). The key insight remains: **each retriangulation has a small but nonzero cost, and they add up**.
