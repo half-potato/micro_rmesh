@@ -2380,6 +2380,11 @@ class VertexOptimizer:
         all_interior = (indices < n_int).all(dim=1)
         quality[~all_interior] = float('inf')
 
+        # Skip extremely degenerate tets — inserting centroids there creates
+        # near-coplanar vertices that crash gDel3D
+        too_degenerate = quality < 1e-6
+        quality[too_degenerate] = float('inf')
+
         # Select worst tets
         if quality_threshold > 0:
             bad_mask = quality < quality_threshold
