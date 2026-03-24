@@ -100,9 +100,9 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings — after densification
+# Decimation Settings — after densification and MCMC
 args.decimate_start = 450
-args.decimate_end = 700
+args.decimate_end = 950
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -202,8 +202,8 @@ while True:
     do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_mcmc = (step == 700)
     do_grad_densify = False
-    # Refine+decimate after densification
-    do_refine = (step in [500, 600]
+    # Refine+decimate after densification AND after MCMC
+    do_refine = (step in [500, 600, 800, 900]
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
@@ -341,6 +341,11 @@ while True:
 
     if do_mcmc:
         with torch.no_grad():
+            # Measure PSNR before MCMC
+            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            pre_l2 = ((target - pre_render['render'])**2 * gt_mask).mean()
+            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+
             psnrs = []
             sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
             gc.collect()
@@ -351,6 +356,13 @@ while True:
             n_relocated = apply_mcmc_relocation(
                 stats, model, tet_optim, args, device, max_relocate=10000)
             del stats
+
+            # Measure PSNR after MCMC
+            post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            post_l2 = ((target - post_render['render'])**2 * gt_mask).mean()
+            post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
+            print(f"  [MCMC step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f})")
+
             gc.collect()
             torch.cuda.empty_cache()
 
