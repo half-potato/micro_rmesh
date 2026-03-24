@@ -68,6 +68,7 @@ args.vertices_lr = 1e-4
 args.final_vertices_lr = 1e-6
 args.vertices_lr_delay_multi = 1e-8
 args.delaunay_interval = 300
+args.iterations = 30000  # slow LR decay — model needs high LR for recovery after densification
 
 # Distortion Settings
 args.lambda_dist = 0.0
@@ -102,7 +103,7 @@ args.voxel_size = 0.01
 
 # Decimation Settings — after each topology change
 args.decimate_start = 450
-args.decimate_end = 1500
+args.decimate_end = 2300
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -198,12 +199,12 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    # Error-targeted densification at steps 400 and 1200 + MCMC at 800
-    do_cloning = (step in [400, 1200] and model.vertices.shape[0] < test_util.VERT_BUDGET)
-    do_mcmc = (step == 800)
+    # Error-targeted densification at steps 400, 1200, 2000 + MCMC at 800, 1600
+    do_cloning = (step in [400, 1200, 2000] and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    do_mcmc = (step in [800, 1600])
     do_grad_densify = False
     # Refine+decimate after each topology change
-    do_refine = (step in [500, 600, 900, 1000, 1300, 1400]
+    do_refine = (step in [500, 600, 900, 1000, 1300, 1400, 1700, 2100, 2200]
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0

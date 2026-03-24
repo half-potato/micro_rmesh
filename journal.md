@@ -252,3 +252,37 @@ Refinement is **25x less disruptive**. Some rounds actually **improved** PSNR (+
 **Discovery**: The refine+decimate pipeline works mechanically — mesh quality improved (radius-edge ratio 8.6→4.2), vertex count stable at ~57k. But **71 topology changes is too many**. Even at -0.03 dB per change, cumulative disruption prevents convergence. The model never gets to settle into any topology long enough to learn good colors.
 
 **Implication**: Refine+decimate should be done in bulk early (a few big passes), then stopped. Or at much lower frequency (every 500+ steps). The key insight remains: **each retriangulation has a small but nonzero cost, and they add up**.
+
+## Shift: 2026-03-23
+Goals: Combine densification techniques to push past 20.77. Implement IBP-Simpson shader. Scale to 20min/1M budget.
+
+### Key results
+
+| Config | PSNR | Vertices | Budget | Key change |
+|---|---|---|---|---|
+| Prior best (8x upfront tile16) | 20.77 | 411k | 10min | Random jitter only |
+| 4x + error densify + refine/decimate | 20.92 | 240k | 10min | Error-targeted beats random |
+| + IBP-Simpson shader | **21.03** | 240k | 10min | Better integration accuracy |
+| + MCMC relocation (decim-based) | 20.91 | 240k | 10min | Nearly free at 2% of vertices |
+| **20min: 8x + 2x densify + MCMC** | **21.76** | **495k** | **20min** | Larger budget scales well |
+
+### Investigation: IBP-Simpson shader
+Replaced N-sample quadrature with IBP decomposition from ~/approximation analysis. C = c₀α + (c₁-c₀)[I/dt - (1-α)] where α is exact and I uses Simpson's rule with cheap τ(dt/2) = τ/(√(e^δ)+1). Taylor expansion for small δ prevents catastrophic cancellation. +0.11 dB for free.
+
+### Investigation: MCMC relocation
+Decimation-based criterion finds expendable vertices (short edges, uniform color, low density). At 443k vertices, relocating 10k (2.3%) caused only -0.10 dB disruption — essentially free. The refine+decimate pipeline after MCMC recovered +0.12 dB.
+
+### Investigation: Delaunay benchmark
+187ms for 205k vertices: gDel3D 116ms (62%), numpy filter 58ms (31%). Not the bottleneck — disruption is.
+
+### 20-minute baseline: 21.76 PSNR
+8x upfront (411k) → densify at 400 (+32k) → refine/decimate 500-600 → MCMC at 800 (10k relocated, -0.10 dB) → refine/decimate 800-1100 → densify at 1200 (+72k) → refine/decimate 1300-1400 → train undisturbed → 21.76 PSNR, 495k vertices, 3850 steps.
+
+Train PSNR still climbing at end (20.02) — model hasn't converged. Room for improvement.
+
+### Open questions
+- More densification rounds? 3rd round at step 2000?
+- More MCMC rounds to continuously redistribute?
+- Larger upfront (10-12x)?
+- LR schedule tuning for 20min — current decay designed for 10min
+- Fill to 1M vertices?
