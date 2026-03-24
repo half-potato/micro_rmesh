@@ -2177,9 +2177,10 @@ class VertexOptimizer:
         **kwargs,
     ) -> None:
         self.model = model
+        self.lr_multipliers = {"sigma": 5.0, "color": 1.0}
 
         self.optim = optim.CustomAdam([
-            {"params": [model.sigma], "lr": freeze_lr * 1.5, "name": "sigma"},
+            {"params": [model.sigma], "lr": freeze_lr * self.lr_multipliers["sigma"], "name": "sigma"},
             {"params": [model.rgb], "lr": freeze_lr, "name": "color"},
         ], eps=1e-15)
         self.sh_optim = optim.CustomAdam([
@@ -2226,13 +2227,13 @@ class VertexOptimizer:
         self.zero_grad()
 
     def update_learning_rate(self, iteration):
+        base_lr = self.scheduler(iteration)
         for param_group in self.optim.param_groups:
-            lr = self.scheduler(iteration)
-            param_group["lr"] = lr
+            mult = self.lr_multipliers.get(param_group["name"], 1.0)
+            param_group["lr"] = base_lr * mult
 
         for param_group in self.sh_optim.param_groups:
-            lr = self.scheduler(iteration)
-            param_group["lr"] = lr
+            param_group["lr"] = base_lr
 
         for param_group in self.vertex_optim.param_groups:
             if param_group["name"] == "interior_vertices":
@@ -2248,19 +2249,25 @@ class VertexOptimizer:
         """Retriangulate — just swap indices, no parameter transfer needed."""
         self.model.update_triangulation(**kwargs)
 
-    def _rebuild_attr_optim(self):
-        """Rebuild per-vertex attribute optimizers preserving LR."""
-        lr_sigma = self.optim.param_groups[0]["lr"]
-        lr_color = self.optim.param_groups[1]["lr"] if len(self.optim.param_groups) > 1 else lr_sigma
-        sh_lr = self.sh_optim.param_groups[0]["lr"]
+    def _cat_attrs(self, new_sigma, new_rgb, new_sh):
+        """Extend sigma/rgb/sh via their optimizers, preserving Adam state."""
+        updated = self.optim.cat_tensors_to_optimizer(
+            dict(sigma=new_sigma, color=new_rgb))
+        self.model.sigma = updated["sigma"]
+        self.model.rgb = updated["color"]
 
-        self.optim = optim.CustomAdam([
-            {"params": [self.model.sigma], "lr": lr_sigma, "name": "sigma"},
-            {"params": [self.model.rgb], "lr": lr_color, "name": "color"},
-        ], eps=1e-15)
-        self.sh_optim = optim.CustomAdam([
-            {"params": [self.model.sh], "lr": sh_lr, "name": "sh"},
-        ], eps=1e-7)  # half-precision safe eps
+        updated_sh = self.sh_optim.cat_tensors_to_optimizer(dict(sh=new_sh))
+        self.model.sh = updated_sh["sh"]
+        self.net_optim = self.optim
+
+    def _prune_attrs(self, keep_mask):
+        """Prune sigma/rgb/sh via their optimizers, preserving Adam state."""
+        updated = self.optim.prune_optimizer(keep_mask)
+        self.model.sigma = updated["sigma"]
+        self.model.rgb = updated["color"]
+
+        updated_sh = self.sh_optim.prune_optimizer(keep_mask)
+        self.model.sh = updated_sh["sh"]
         self.net_optim = self.optim
 
     @torch.no_grad()
@@ -2289,15 +2296,9 @@ class VertexOptimizer:
             dict(interior_vertices=new_positions)
         )["interior_vertices"]
 
-        # Extend per-vertex params
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
 
-        self._rebuild_attr_optim()
         model.update_triangulation()
         model.device = model.sigma.device
 
@@ -2327,15 +2328,9 @@ class VertexOptimizer:
             dict(interior_vertices=centroids)
         )["interior_vertices"]
 
-        # Extend per-vertex params with averaged values
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
 
-        self._rebuild_attr_optim()
         model.update_triangulation()
         model.device = model.sigma.device
 
@@ -2374,13 +2369,8 @@ class VertexOptimizer:
             dict(interior_vertices=centroids)
         )["interior_vertices"]
 
-        # Extend per-vertex params
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
 
         # Build new index buffer: replace each parent tet with 4 sub-tets
         # Centroid indices: V_old + 0, V_old + 1, ..., V_old + K-1
@@ -2409,7 +2399,6 @@ class VertexOptimizer:
         model.indices = torch.cat([kept_indices, new_tets], dim=0).contiguous()
         model.empty_indices = torch.empty((0, 4), dtype=model.indices.dtype, device='cuda')
 
-        self._rebuild_attr_optim()
         model.device = model.sigma.device
 
         print(f"1-to-4 split {K} tets (no Delaunay): "
@@ -2542,14 +2531,10 @@ class VertexOptimizer:
         model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
             dict(interior_vertices=insert_pts)
         )["interior_vertices"]
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
 
-        self._rebuild_attr_optim()
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
+
         model.update_triangulation()
         model.device = model.sigma.device
 
@@ -2570,12 +2555,60 @@ class VertexOptimizer:
             "interior_vertices"
         ]
 
-        # Prune per-vertex attributes
-        model.sigma = nn.Parameter(model.sigma.data[keep_mask].contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(model.rgb.data[keep_mask].contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(model.sh.data[keep_mask].contiguous().requires_grad_(True))
+        # Prune per-vertex attrs via optimizer (preserves Adam state)
+        self._prune_attrs(keep_mask)
 
-        self._rebuild_attr_optim()
+        model.update_triangulation()
+        model.device = model.sigma.device
+
+    @torch.no_grad()
+    def collapse_and_split(self, collapse_va, collapse_vb,
+                           new_positions, new_sigma, new_rgb, new_sh):
+        """Collapse edges (va→midpoint, remove vb) + add new vertices.
+
+        Single retriangulation at the end.
+
+        Args:
+            collapse_va: (C,) int tensor — surviving vertex per collapsed edge
+            collapse_vb: (C,) int tensor — removed vertex per collapsed edge
+            new_positions: (S, 3) float tensor — positions of new vertices to add
+            new_sigma: (S, ...) — sigma for new vertices
+            new_rgb: (S, ...) — rgb for new vertices
+            new_sh: (S, ...) — sh for new vertices
+        """
+        model = self.model
+        n_int = model.interior_vertices.shape[0]
+
+        # --- 1. Edge collapse: move va to midpoint, average attrs ---
+        C = collapse_va.shape[0]
+        if C > 0:
+            verts_data = model.interior_vertices.data
+            midpoints = (verts_data[collapse_va] + verts_data[collapse_vb]) / 2
+            verts_data[collapse_va] = midpoints
+
+            # Average attributes at midpoint
+            model.sigma.data[collapse_va] = (model.sigma.data[collapse_va] + model.sigma.data[collapse_vb]) / 2
+            model.rgb.data[collapse_va] = (model.rgb.data[collapse_va] + model.rgb.data[collapse_vb]) / 2
+            model.sh.data[collapse_va] = (model.sh.data[collapse_va] + model.sh.data[collapse_vb]) / 2
+
+            # Remove vb
+            keep_mask = torch.ones(n_int, dtype=torch.bool, device=model.device)
+            keep_mask[collapse_vb] = False
+
+            model.interior_vertices = self.vertex_optim.prune_optimizer(keep_mask)[
+                "interior_vertices"
+            ]
+            self._prune_attrs(keep_mask)
+
+        # --- 2. Add new vertices ---
+        S = new_positions.shape[0]
+        if S > 0:
+            model.interior_vertices = self.vertex_optim.cat_tensors_to_optimizer(
+                dict(interior_vertices=new_positions)
+            )["interior_vertices"]
+            self._cat_attrs(new_sigma, new_rgb, new_sh)
+
+        # --- 3. Single retriangulation ---
         model.update_triangulation()
         model.device = model.sigma.device
 
@@ -2608,15 +2641,9 @@ class VertexOptimizer:
             dict(interior_vertices=new_positions)
         )["interior_vertices"]
 
-        # Extend per-vertex params
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
 
-        self._rebuild_attr_optim()
         model.update_triangulation()
         model.device = model.sigma.device
 
@@ -2651,15 +2678,9 @@ class VertexOptimizer:
             dict(interior_vertices=new_positions)
         )["interior_vertices"]
 
-        # Extend per-vertex params
-        model.sigma = nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
+        # Extend per-vertex attrs via optimizer (preserves Adam state)
+        self._cat_attrs(new_sigma, new_rgb, new_sh)
 
-        self._rebuild_attr_optim()
         model.update_triangulation()
         model.device = model.sigma.device
 

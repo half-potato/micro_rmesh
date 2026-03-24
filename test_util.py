@@ -10,9 +10,9 @@ from fused_ssim import fused_ssim
 from utils.train_util import render
 import matplotlib.pyplot as plt
 
-VERT_BUDGET = 500000
-TIME_BUDGET = 600
-DENSIFICATION_TIME_BUDGET = 400
+VERT_BUDGET = 1000000
+TIME_BUDGET = 1200
+DENSIFICATION_TIME_BUDGET = 1000
 
 torch.set_printoptions(precision=10)
 

@@ -23,6 +23,10 @@ import test_util
 import gc
 from utils.densification import collect_render_stats, apply_densification, apply_grad_densification, apply_vertex_densification, apply_mcmc_relocation
 from utils.decimation import apply_decimation
+from utils.train_util import pad_image2even
+from utils import cam_util
+import imageio
+import mediapy
 
 
 torch.set_num_threads(1)
@@ -55,8 +59,8 @@ args.sh_interval = 0
 args.sh_step = 1
 
 # Per-vertex LR: ~1/5 of per-tet LR to compensate for gradient accumulation
-args.freeze_lr = 6e-3
-args.final_freeze_lr = 6e-4
+args.freeze_lr = 1e-2
+args.final_freeze_lr = 1e-3
 args.additional_attr = 0
 args.n_quad_samples = 2
 args.density_offset = -4
@@ -101,9 +105,9 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings — after each topology change
+# Decimation — light cleanup only after densification
 args.decimate_start = 450
-args.decimate_end = 2300
+args.decimate_end = 1350
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -147,6 +151,31 @@ densification_sampler = SimpleSampler(len(train_cameras), args.num_samples, devi
 
 torch.cuda.empty_cache()
 
+DEBUG_PSNR = True  # measure PSNR over all train cameras (slow but accurate)
+
+# Debug video: sample frame rendered periodically + 360 orbit at end
+if DEBUG_PSNR:
+    debug_output = Path("./") / "debug_output"
+    debug_output.mkdir(exist_ok=True)
+    sample_camera = test_cameras[args.sample_cam] if len(test_cameras) > args.sample_cam else train_cameras[args.sample_cam]
+    video_writer = imageio.get_writer(str(debug_output / "training.mp4"), fps=10)
+
+def measure_psnr(model, cameras, args, device):
+    """Mean PSNR over all cameras."""
+    total_mse = 0.0
+    for i, cam in enumerate(cameras):
+        out = render(cam, model, ray_jitter=torch.ones((cam.image_height, cam.image_width, 2), device=device)*0.5, **args.as_dict())
+        img = out['render']
+        if torch.isnan(img).any() or torch.isinf(img).any():
+            print(f"  [measure_psnr] camera {i}: NaN={torch.isnan(img).any()}, Inf={torch.isinf(img).any()}, "
+                  f"min={img[~torch.isnan(img)].min():.4f}, max={img[~torch.isnan(img)].max():.4f}")
+            continue
+        gt = cam.original_image.to(device)
+        mask = cam.gt_alpha_mask.to(device) if cam.gt_alpha_mask is not None else 1.0
+        total_mse += ((gt - img)**2 * mask).mean().item()
+    avg_mse = total_mse / len(cameras)
+    return -10 * math.log10(max(avg_mse, 1e-10))
+
 t_start_training = time.time()
 smooth_train_loss = 0
 total_training_time = 0
@@ -175,14 +204,7 @@ if init_upsample > 1:
             dict(interior_vertices=new_positions)
         )["interior_vertices"]
 
-        model.sigma = torch.nn.Parameter(
-            torch.cat([model.sigma.data, new_sigma]).contiguous().requires_grad_(True))
-        model.rgb = torch.nn.Parameter(
-            torch.cat([model.rgb.data, new_rgb]).contiguous().requires_grad_(True))
-        model.sh = torch.nn.Parameter(
-            torch.cat([model.sh.data, new_sh]).contiguous().requires_grad_(True))
-
-        tet_optim._rebuild_attr_optim()
+        tet_optim._cat_attrs(new_sigma, new_rgb, new_sh)
         model.update_triangulation()
         model.device = model.sigma.device
         print(f"Upfront densification: {n_int} to {model.vertices.shape[0]} vertices, {model.indices.shape[0]} tets")
@@ -199,41 +221,39 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    # Error-targeted densification at steps 400, 1200, 2000 + MCMC at 800, 1600
-    do_cloning = (step in [400, 1200, 2000] and model.vertices.shape[0] < test_util.VERT_BUDGET)
-    do_mcmc = (step in [800, 1600])
+    # Error-targeted densification at 400 and 1200, MCMC at 800. No refine — too disruptive at scale.
+    do_cloning = False #(step in [400, 1200] and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    do_mcmc = step > 0 and step % 100 == 0
     do_grad_densify = False
-    # Refine+decimate after each topology change
-    do_refine = (step in [500, 600, 900, 1000, 1300, 1400, 1700, 2100, 2200]
-                 and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    do_refine = step > 0 and step % 25 == 0 and not do_mcmc
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
     do_decimation = (step >= args.decimate_start and step < args.decimate_end
                      and step % args.decimate_interval == 0)
 
     if do_delaunay:
-        # Measure PSNR before retriangulation
-        with torch.no_grad():
-            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-            pre_img = pre_render['render']
-            pre_l2 = ((target - pre_img)**2 * gt_mask).mean()
-            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+        if DEBUG_PSNR:
+            with torch.no_grad():
+                model.eval()
+                pre_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
         old_n_tets = model.indices.shape[0]
         st = time.time()
         tet_optim.update_triangulation(
             density_threshold=args.density_threshold if step > args.threshold_start else 0,
             alpha_threshold=args.alpha_threshold if step > args.threshold_start else 0,
             high_precision=False)
-        # Measure PSNR after retriangulation
-        with torch.no_grad():
-            post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-            post_img = post_render['render']
-            post_l2 = ((target - post_img)**2 * gt_mask).mean()
-            post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
         new_n_tets = model.indices.shape[0]
         dt_del = time.time() - st
-        print(f"[DELAUNAY step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) "
-              f"tets: {old_n_tets} -> {new_n_tets} time={dt_del:.2f}s")
+        if DEBUG_PSNR:
+            with torch.no_grad():
+                model.eval()
+                post_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
+            print(f"[DELAUNAY step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) "
+                  f"tets: {old_n_tets} -> {new_n_tets} time={dt_del:.2f}s")
+        else:
+            print(f"[DELAUNAY step {step}] tets: {old_n_tets} -> {new_n_tets} time={dt_del:.2f}s")
 
     if len(inds) == 0:
         print(f"TRAIN PSNR: {sum(psnrs)/len(psnrs)} #V: {len(model)} #T: {model.indices.shape[0]}")
@@ -300,7 +320,7 @@ while True:
         tet_optim.sh_optim.step()
         tet_optim.sh_optim.zero_grad()
 
-    if True:
+    if do_mcmc or do_refine:
         tet_optim.vertex_optim.step()
         tet_optim.vertex_optim.zero_grad()
 
@@ -342,47 +362,65 @@ while True:
 
     if do_mcmc:
         with torch.no_grad():
-            # Measure PSNR before MCMC
-            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-            pre_l2 = ((target - pre_render['render'])**2 * gt_mask).mean()
-            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+            if DEBUG_PSNR:
+                model.eval()
+                pre_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
 
-            psnrs = []
-            sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
-            gc.collect()
-            torch.cuda.empty_cache()
-            model.eval()
-            stats = collect_render_stats(sampled_cams, model, args, device)
-            model.train()
+            st_mcmc = time.time()
             n_relocated = apply_mcmc_relocation(
-                stats, model, tet_optim, args, device, max_relocate=10000)
-            del stats
+                model, tet_optim, args, device, max_relocate=int(0.05 * model.vertices.shape[0]))
+            dt_mcmc = time.time() - st_mcmc
 
-            # Measure PSNR after MCMC
-            post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-            post_l2 = ((target - post_render['render'])**2 * gt_mask).mean()
-            post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
-            print(f"  [MCMC step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f})")
+            # Debug: check model state after MCMC
+            v = model.vertices
+            assert not torch.isnan(v).any(), \
+                f"NaN in vertices after MCMC! int_nan={torch.isnan(model.interior_vertices.data).any()}, ext_nan={torch.isnan(model.ext_vertices).any()}"
+            assert not torch.isnan(model.sigma.data).any(), "NaN in sigma after MCMC!"
+            assert model.sigma.shape[0] == model.interior_vertices.shape[0], \
+                f"sigma/verts mismatch: sigma={model.sigma.shape[0]} verts={model.interior_vertices.shape[0]}"
+            idx = model.indices.long()
+            assert idx.max() < v.shape[0], f"index OOB: max_idx={idx.max()} n_verts={v.shape[0]}"
+            assert idx.min() >= 0, f"negative index: min_idx={idx.min()}"
+            # Check a test render
+            test_cam = train_cameras[0]
+            test_out = render(test_cam, model, ray_jitter=torch.ones((test_cam.image_height, test_cam.image_width, 2), device=device)*0.5, **args.as_dict())
+            test_img = test_out['render']
+            print(f"  [MCMC debug] render has_nan={torch.isnan(test_img).any()}, has_inf={torch.isinf(test_img).any()}, "
+                  f"min={test_img.min():.4f}, max={test_img.max():.4f}")
+
+            if DEBUG_PSNR:
+                model.eval()
+                post_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
+                print(f"  [MCMC step {step}] relocated={n_relocated}, PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) time={dt_mcmc:.2f}s")
+            else:
+                print(f"  [MCMC step {step}] relocated={n_relocated} time={dt_mcmc:.2f}s")
 
             gc.collect()
             torch.cuda.empty_cache()
 
     if do_refine:
         with torch.no_grad():
-            # Measure PSNR impact of refinement
-            pre_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-            pre_l2 = ((target - pre_render['render'])**2 * gt_mask).mean()
-            pre_psnr = -20 * math.log10(math.sqrt(pre_l2.cpu().clip(min=1e-6).item()))
+            if DEBUG_PSNR:
+                model.eval()
+                pre_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
 
+            st_refine = time.time()
             budget_left = test_util.VERT_BUDGET - model.vertices.shape[0]
             n_add = min(5000, budget_left)
             if n_add > 0:
                 added = tet_optim.refine_bad_tets(max_vertices=n_add)
+                dt_refine = time.time() - st_refine
 
-                post_render = render(camera, model, ray_jitter=torch.ones((camera.image_height, camera.image_width, 2), device=device)*0.5, **args.as_dict())
-                post_l2 = ((target - post_render['render'])**2 * gt_mask).mean()
-                post_psnr = -20 * math.log10(math.sqrt(post_l2.cpu().clip(min=1e-6).item()))
-                print(f"  [REFINE step {step}] PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f})")
+                if DEBUG_PSNR:
+                    model.eval()
+                    post_psnr = measure_psnr(model, train_cameras, args, device)
+                    model.train()
+                    print(f"  [REFINE step {step}] added={added}, PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) time={dt_refine:.2f}s")
+                else:
+                    print(f"  [REFINE step {step}] added={added} time={dt_refine:.2f}s")
 
     if do_grad_densify:
         with torch.no_grad():
@@ -405,7 +443,23 @@ while True:
 
     if do_decimation:
         with torch.no_grad():
+            if DEBUG_PSNR:
+                model.eval()
+                pre_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
+
+            st_dec = time.time()
             n_removed = apply_decimation(model, tet_optim, args, device)
+            dt_dec = time.time() - st_dec
+
+            if DEBUG_PSNR:
+                model.eval()
+                post_psnr = measure_psnr(model, train_cameras, args, device)
+                model.train()
+                print(f"  [DECIMATE step {step}] removed={n_removed}, PSNR: {pre_psnr:.2f} -> {post_psnr:.2f} (delta={post_psnr-pre_psnr:+.2f}) time={dt_dec:.2f}s")
+            else:
+                print(f"  [DECIMATE step {step}] removed={n_removed} time={dt_dec:.2f}s")
+
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -421,6 +475,13 @@ while True:
 
     if step % 50 == 0:
         print(f"[step {step:5d}] PSNR={psnr:.2f} #V={len(model)} #T={model.indices.shape[0]} t={total_training_time:.1f}s")
+
+    if DEBUG_PSNR and step % 10 == 0:
+        with torch.no_grad():
+            render_pkg = render(sample_camera, model, ray_jitter=torch.ones((sample_camera.image_height, sample_camera.image_width, 2), device=device)*0.5, **args.as_dict())
+            sample_image = render_pkg['render'].permute(1, 2, 0)
+            sample_image = (sample_image.clamp(0, 1).detach().cpu().numpy() * 255).astype(np.uint8)
+            video_writer.append_data(pad_image2even(sample_image))
 
     if step == 0:
         gc.collect()
@@ -439,6 +500,23 @@ print()
 
 torch.cuda.synchronize()
 torch.cuda.empty_cache()
+
+if DEBUG_PSNR:
+    video_writer.close()
+    print(f"Training video saved to {debug_output / 'training.mp4'}")
+
+    # 360 orbit video
+    with torch.no_grad():
+        model.eval()
+        epath = cam_util.generate_cam_path(train_cameras, 400)
+        eimages = []
+        for cam in epath:
+            render_pkg = render(cam, model, ray_jitter=torch.ones((cam.image_height, cam.image_width, 2), device=device)*0.5, **args.as_dict())
+            image = render_pkg['render'].permute(1, 2, 0).clamp(0, 1).detach().cpu().numpy()
+            eimages.append(pad_image2even(image))
+        model.train()
+    mediapy.write_video(str(debug_output / "rotating.mp4"), eimages)
+    print(f"360 video saved to {debug_output / 'rotating.mp4'}")
 
 splits = zip(['test'], [test_cameras])
 results = test_util.evaluate(model, splits, "", args.tile_size, min_t, save=False, n_quad_samples=args.n_quad_samples)

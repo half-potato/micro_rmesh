@@ -310,118 +310,173 @@ def apply_densification(
 
 @torch.no_grad()
 def apply_mcmc_relocation(
-    stats: RenderStats,
     model,
     tet_optim,
     args,
     device: torch.device,
     max_relocate: int = 10000,
 ):
-    """MCMC-style vertex relocation using decimation scoring.
+    """MCMC-style edge collapse + edge split. Net zero vertex change.
 
-    Uses the existing edge decimation heuristic to find expendable vertices
-    (short edges in uniform/low-density regions), then relocates them to
-    high-error tet centroids. No net vertex count change.
-
-    1. Score edges with decimation heuristic (low score = expendable)
-    2. Pick one vertex per low-scoring edge as relocation candidate
-    3. Find high-error tets as relocation targets
-    4. Move candidates to target centroids with interpolated attributes
-    5. Retriangulate
+    1. Score all edges (low score = expendable, high score = important)
+    2. Greedy conflict resolution to select non-overlapping edges
+    3. Collapse lowest-score edges (merge to midpoint, remove one vertex)
+    4. Split highest-score edges (add midpoint vertex)
+    5. Single retriangulation
     """
     from utils.decimation import build_edge_list, compute_edge_scores, query_tet_rgb
 
-    indices = model.indices.long()
     n_int = model.num_int_verts
+    sigma = model.sigma.data.squeeze()
 
-    # 1. Score edges using decimation heuristic
+    # 1. Score edges
     tet_rgb = query_tet_rgb(model)
     edges = build_edge_list(model.indices)
     scores = compute_edge_scores(edges, model.indices, model.vertices, tet_rgb, n_int)
 
-    # Density weighting: protect high-density edges
-    if hasattr(model, 'sigma'):
-        sigma = model.sigma.data.squeeze()
-        edge_density = (sigma[edges[:, 0]] + sigma[edges[:, 1]]) / 2
-        density_weight = torch.exp(edge_density.clamp(max=5))
-        scores = scores * density_weight
+    # Density weighting: protect high-density edges from collapse
+    edge_density = (sigma[edges[:, 0]] + sigma[edges[:, 1]]) / 2
+    density_weight = torch.exp(edge_density.clamp(max=5))
+    scores = scores * density_weight
 
-    # 2. Select lowest-scoring edges → pick one vertex per edge
-    order = torch.argsort(scores)
-    claimed = set()
-    relocate_candidates = []
-    for i in range(order.shape[0]):
-        if len(relocate_candidates) >= max_relocate:
-            break
-        idx = order[i].item()
-        if scores[idx] == float('inf'):
-            break
-        va = edges[idx, 0].item()
-        vb = edges[idx, 1].item()
-        if va in claimed or vb in claimed:
-            continue
-        if va >= n_int or vb >= n_int:
-            continue
-        # Pick the vertex with lower density as the relocation candidate
-        if sigma[va] < sigma[vb]:
-            relocate_candidates.append(va)
-        else:
-            relocate_candidates.append(vb)
-        claimed.add(va)
-        claimed.add(vb)
+    # Interior-only mask
+    interior = (edges[:, 0] < n_int) & (edges[:, 1] < n_int)
 
-    if len(relocate_candidates) == 0:
-        print("MCMC: no expendable vertices found")
+    # 2. Greedy conflict resolution for collapse candidates (lowest scores)
+    order_low = torch.argsort(scores)
+    finite_mask = scores[order_low] < float('inf')
+    order_low = order_low[finite_mask & interior[order_low]]
+
+    def greedy_select(ordered_edges, max_k):
+        """Vectorized greedy: first edge claiming a vertex wins."""
+        if ordered_edges.shape[0] == 0:
+            return ordered_edges[:0]
+        flat = ordered_edges.reshape(-1)
+        eidx = torch.arange(ordered_edges.shape[0], device=device).unsqueeze(1).expand_as(ordered_edges).reshape(-1)
+        first = torch.full((model.vertices.shape[0],), ordered_edges.shape[0], device=device, dtype=torch.long)
+        first.scatter_reduce_(0, flat, eidx, reduce='amin', include_self=True)
+        arange = torch.arange(ordered_edges.shape[0], device=device)
+        valid = (first[ordered_edges[:, 0]] == arange) & (first[ordered_edges[:, 1]] == arange)
+        return ordered_edges[valid][:max_k]
+
+    collapse_edges = greedy_select(edges[order_low], max_relocate)
+    n_collapse = collapse_edges.shape[0]
+    if n_collapse == 0:
         return 0
 
-    relocate_idx = torch.tensor(relocate_candidates, device=device, dtype=torch.long)
+    # Pick va (higher density, survives) and vb (lower density, removed)
+    sa = sigma[collapse_edges[:, 0]]
+    sb = sigma[collapse_edges[:, 1]]
+    collapse_va = torch.where(sa >= sb, collapse_edges[:, 0], collapse_edges[:, 1])
+    collapse_vb = torch.where(sa >= sb, collapse_edges[:, 1], collapse_edges[:, 0])
 
-    # 3. Find high-error tets as relocation targets
-    s0_t, s1_t, s2_t = stats.total_var_moments.T
-    total_var_mu = safe_math.safe_div(s1_t, s0_t)
-    total_var_std = (safe_math.safe_div(s2_t, s0_t) - total_var_mu**2).clip(min=0)
-    total_var_std[s0_t < 1] = 0
-    tet_error = s0_t * total_var_std
-    tet_error[stats.tet_view_count < 2] = 0
-    tet_error[stats.peak_contrib < args.clone_min_contrib] = 0
+    # 3. Select split candidates (highest scores) — must not overlap with collapse vertices
+    order_high = torch.argsort(scores, descending=True)
+    order_high = order_high[interior[order_high]]
+    # Exclude edges that share vertices with collapse edges
+    collapsed_verts = torch.zeros(model.vertices.shape[0], dtype=torch.bool, device=device)
+    collapsed_verts[collapse_va] = True
+    collapsed_verts[collapse_vb] = True
+    high_edges = edges[order_high]
+    no_overlap = ~collapsed_verts[high_edges[:, 0]] & ~collapsed_verts[high_edges[:, 1]]
+    high_edges = high_edges[no_overlap]
 
-    all_interior = (indices < n_int).all(dim=1)
-    tet_error[~all_interior] = 0
+    split_edges = greedy_select(high_edges, n_collapse)
+    n_split = split_edges.shape[0]
 
-    n_relocate = relocate_idx.shape[0]
-    _, top_tet_idx = tet_error.topk(min(n_relocate, tet_error.shape[0]))
-    top_tet_idx = top_tet_idx[tet_error[top_tet_idx] > 0]
+    # 4. Compute new vertex positions at circumcenters of tets adjacent to split edges
+    if n_split > 0:
+        from utils.topo_utils import calculate_circumcenters_torch
 
-    if top_tet_idx.shape[0] == 0:
-        print("MCMC: no high-error tets found")
-        return 0
+        indices = model.indices.long()
+        verts = model.vertices
+        T = indices.shape[0]
 
-    # Match candidates to targets (cycle if needed)
-    n_targets = min(n_relocate, top_tet_idx.shape[0])
-    relocate_idx = relocate_idx[:n_targets]
-    if n_targets > top_tet_idx.shape[0]:
-        repeats = (n_targets + top_tet_idx.shape[0] - 1) // top_tet_idx.shape[0]
-        target_tets = top_tet_idx.repeat(repeats)[:n_targets]
+        # Build edge→tet mapping: for each split edge, find one tet containing it
+        # Pack edges as int64 keys for fast lookup
+        V_max = verts.shape[0]
+        split_keys = split_edges[:, 0].long() * V_max + split_edges[:, 1].long()
+
+        # Generate all 6 edges per tet
+        pair_offsets = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+        all_va, all_vb, all_tet = [], [], []
+        tet_arange = torch.arange(T, device=device)
+        for i, j in pair_offsets:
+            ei, ej = indices[:, i], indices[:, j]
+            va = torch.min(ei, ej)
+            vb = torch.max(ei, ej)
+            all_va.append(va)
+            all_vb.append(vb)
+            all_tet.append(tet_arange)
+        all_va = torch.cat(all_va)
+        all_vb = torch.cat(all_vb)
+        all_tet = torch.cat(all_tet)
+        all_keys = all_va * V_max + all_vb
+
+        # For each split edge, find one matching tet via searchsorted
+        sort_order = torch.argsort(all_keys)
+        sorted_keys = all_keys[sort_order]
+        sorted_tets = all_tet[sort_order]
+        lookup_idx = torch.searchsorted(sorted_keys, split_keys)
+        lookup_idx = lookup_idx.clamp(0, sorted_keys.shape[0] - 1)
+        # Verify match
+        matched = sorted_keys[lookup_idx] == split_keys
+        target_tet_idx = sorted_tets[lookup_idx]
+
+        # Compute circumcenters for matched tets
+        p = verts[indices[target_tet_idx]]  # (S, 4, 3)
+        cc, _ = calculate_circumcenters_torch(p.double())
+        cc = cc.float()
+
+        # Filter degenerate circumcenters
+        centroid = p.mean(dim=1)
+        cc_dist = (cc - centroid).norm(dim=1)
+        edges_pairs_list = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+        min_el = torch.full((n_split,), float('inf'), device=device)
+        for i, j in edges_pairs_list:
+            el = (p[:, i] - p[:, j]).norm(dim=1)
+            min_el = torch.minimum(min_el, el)
+        use_centroid = (~matched) | (cc_dist > min_el * 5)
+        cc[use_centroid] = centroid[use_centroid]
+
+        # Barycentric interpolation at circumcenter
+        v0, v1, v2, v3 = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
+        def tet_vol_signed(a, b, c, d):
+            return torch.sum((b - a) * torch.cross(c - a, d - a, dim=1), dim=1)
+
+        vol_total = tet_vol_signed(v0, v1, v2, v3).unsqueeze(1)
+        b0 = tet_vol_signed(cc, v1, v2, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b1 = tet_vol_signed(v0, cc, v2, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b2 = tet_vol_signed(v0, v1, cc, v3).unsqueeze(1) / (vol_total + 1e-12)
+        b3 = 1.0 - b0 - b1 - b2
+        bary = torch.cat([b0, b1, b2, b3], dim=1)
+        outside = (bary < -0.1).any(dim=1) | (bary > 1.1).any(dim=1)
+        bary[outside] = 0.25
+        cc[outside] = centroid[outside]
+
+        # Perturb to avoid degenerate Delaunay
+        new_positions = cc + torch.randn_like(cc) * (min_el.unsqueeze(1) * 0.01)
+
+        # Interpolate attributes — clamp exterior vertex indices to valid range
+        tet_verts = indices[target_tet_idx]
+        attr_idx = tet_verts.clamp(max=n_int - 1)  # exterior verts → use last interior's attrs
+        new_sigma = (model.sigma.data[attr_idx] * bary.unsqueeze(-1)).sum(dim=1)
+        new_rgb = (model.rgb.data[attr_idx] * bary.unsqueeze(-1)).sum(dim=1)
+        sh_data = model.sh.data[attr_idx]
+        new_sh = (sh_data * bary.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
     else:
-        target_tets = top_tet_idx[:n_targets]
+        new_positions = torch.empty((0, 3), device=device)
+        new_sigma = torch.empty((0, *model.sigma.shape[1:]), device=device)
+        new_rgb = torch.empty((0, *model.rgb.shape[1:]), device=device)
+        new_sh = torch.empty((0, *model.sh.shape[1:]), device=device)
 
-    # 4. Compute target positions and attributes
-    target_tet_verts = indices[target_tets]
-    verts = model.vertices
-    target_pos = verts[target_tet_verts].mean(dim=1)
-    target_pos = target_pos + torch.randn_like(target_pos) * 0.01
+    # 5. Combined collapse + split with single retriangulation
+    tet_optim.collapse_and_split(collapse_va, collapse_vb,
+                                 new_positions, new_sigma, new_rgb, new_sh)
 
-    target_sigma = model.sigma.data[target_tet_verts].mean(dim=1)
-    target_rgb = model.rgb.data[target_tet_verts].mean(dim=1)
-    target_sh = model.sh.data[target_tet_verts].mean(dim=1)
-
-    avg_score = scores[order[:n_targets]].mean().item()
-    print(f"MCMC: relocating {n_targets} expendable vertices "
-          f"(avg decimation score={avg_score:.2f}) "
-          f"to {top_tet_idx.shape[0]} high-error tet centroids")
-
-    tet_optim.relocate_vertices(relocate_idx, target_pos, target_sigma, target_rgb, target_sh)
-    return n_targets
+    print(f"MCMC: collapsed {n_collapse} edges, split {n_split} edges "
+          f"(#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+    return n_collapse
 
 
 @torch.no_grad()
