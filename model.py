@@ -2659,6 +2659,57 @@ class VertexOptimizer:
 
         print(f"Cloned {K} vertices (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
 
+    @torch.no_grad()
+    def relocate_vertices(self, dead_idx: torch.Tensor, target_positions: torch.Tensor,
+                          target_sigma: torch.Tensor, target_rgb: torch.Tensor,
+                          target_sh: torch.Tensor):
+        """MCMC-style relocation: move dead vertices to new positions with new attributes.
+
+        Modifies vertex positions and attributes in-place, then retriangulates.
+        No net vertex count change.
+
+        Args:
+            dead_idx: (K,) indices of interior vertices to relocate
+            target_positions: (K, 3) new positions
+            target_sigma: (K, 1) new log-density
+            target_rgb: (K, 3) new color
+            target_sh: (K, sh_dim//3, 3) new SH coefficients
+        """
+        model = self.model
+        K = dead_idx.shape[0]
+        if K == 0:
+            return
+
+        # Update positions in-place
+        model.interior_vertices.data[dead_idx] = target_positions
+
+        # Reset attributes
+        model.sigma.data[dead_idx] = target_sigma
+        model.rgb.data[dead_idx] = target_rgb
+        model.sh.data[dead_idx] = target_sh
+
+        # Reset optimizer momentum for relocated vertices
+        for group in self.optim.param_groups:
+            state = self.optim.optimizer.state.get(group['params'][0], None)
+            if state and 'exp_avg' in state:
+                state['exp_avg'][dead_idx] = 0
+                state['exp_avg_sq'][dead_idx] = 0
+        for group in self.sh_optim.param_groups:
+            state = self.sh_optim.optimizer.state.get(group['params'][0], None)
+            if state and 'exp_avg' in state:
+                state['exp_avg'][dead_idx] = 0
+                state['exp_avg_sq'][dead_idx] = 0
+        for group in self.vertex_optim.param_groups:
+            state = self.vertex_optim.optimizer.state.get(group['params'][0], None)
+            if state and 'exp_avg' in state:
+                state['exp_avg'][dead_idx] = 0
+                state['exp_avg_sq'][dead_idx] = 0
+
+        # Retriangulate to fix topology
+        model.update_triangulation()
+
+        print(f"Relocated {K} vertices (#V: {model.vertices.shape[0]}, #T: {model.indices.shape[0]})")
+
     def clip_grad_norm_(self, max_norm):
         torch.nn.utils.clip_grad_norm_(self.model.sigma, max_norm)
         torch.nn.utils.clip_grad_norm_(self.model.rgb, max_norm)

@@ -21,7 +21,7 @@ from utils.args import Args
 import json
 import test_util
 import gc
-from utils.densification import collect_render_stats, apply_densification, apply_grad_densification, apply_vertex_densification
+from utils.densification import collect_render_stats, apply_densification, apply_grad_densification, apply_vertex_densification, apply_mcmc_relocation
 from utils.decimation import apply_decimation
 
 
@@ -198,8 +198,9 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    # Error-targeted densification + refine/decimate cleanup
+    # Error-targeted densification at step 400 + MCMC relocation at step 700
     do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    do_mcmc = (step == 700)
     do_grad_densify = False
     # Refine+decimate after densification
     do_refine = (step in [500, 600]
@@ -334,6 +335,21 @@ while True:
                 device      = device,
                 target_addition= target_addition
             )
+            del stats
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    if do_mcmc:
+        with torch.no_grad():
+            psnrs = []
+            sampled_cams = [train_cameras[i] for i in densification_sampler.nextids()]
+            gc.collect()
+            torch.cuda.empty_cache()
+            model.eval()
+            stats = collect_render_stats(sampled_cams, model, args, device)
+            model.train()
+            n_relocated = apply_mcmc_relocation(
+                stats, model, tet_optim, args, device, max_relocate=10000)
             del stats
             gc.collect()
             torch.cuda.empty_cache()

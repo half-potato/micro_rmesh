@@ -253,6 +253,91 @@ def apply_densification(
 
 
 @torch.no_grad()
+def apply_mcmc_relocation(
+    stats: RenderStats,
+    model,
+    tet_optim,
+    args,
+    device: torch.device,
+    max_relocate: int = 10000,
+):
+    """MCMC-style vertex relocation: move dead vertices to high-error regions.
+
+    1. Find dead vertices: low peak_contrib (never visible / transparent)
+    2. Find high-error tets from render stats
+    3. Relocate dead vertices to centroids of high-error tets
+    4. Initialize with averaged attributes from the target tet's vertices
+    5. Retriangulate (vertex count unchanged)
+    """
+    # Per-tet error
+    s0_t, s1_t, s2_t = stats.total_var_moments.T
+    total_var_mu = safe_math.safe_div(s1_t, s0_t)
+    total_var_std = (safe_math.safe_div(s2_t, s0_t) - total_var_mu**2).clip(min=0)
+    total_var_std[s0_t < 1] = 0
+    tet_error = s0_t * total_var_std
+    tet_error[stats.tet_view_count < 2] = 0
+
+    # Scatter peak_contrib from tets to vertices (max contribution per vertex)
+    indices = model.indices.long()
+    n_int = model.num_int_verts
+    vertex_contrib = torch.zeros(model.vertices.shape[0], device=device)
+    for corner in range(4):
+        vertex_contrib.scatter_reduce_(0, indices[:, corner], stats.peak_contrib, reduce='amax')
+
+    # Dead vertices: low contribution (transparent / invisible)
+    # Use density as secondary signal — very negative sigma means truly transparent
+    sigma = model.sigma.data.squeeze()
+    density = torch.exp(sigma[:n_int] + model._density_offset)
+    is_dead = (vertex_contrib[:n_int] < args.clone_min_contrib) & (density < 0.01)
+
+    dead_idx = is_dead.nonzero().squeeze(-1)
+    n_dead = dead_idx.shape[0]
+    if n_dead == 0:
+        print("MCMC: no dead vertices found")
+        return 0
+
+    # High-error tets as targets (only interior tets)
+    all_interior = (indices < n_int).all(dim=1)
+    tet_error[~all_interior] = 0
+    n_targets = min(max_relocate, n_dead)
+
+    # Select top-error tets as relocation targets
+    _, top_tet_idx = tet_error.topk(min(n_targets, tet_error.shape[0]))
+    top_tet_idx = top_tet_idx[tet_error[top_tet_idx] > 0]
+    n_targets = min(n_targets, top_tet_idx.shape[0])
+    if n_targets == 0:
+        print("MCMC: no high-error tets found")
+        return 0
+
+    # Match dead vertices to target tets (cycle if more dead than targets)
+    relocate_idx = dead_idx[:n_targets]
+    target_tets = top_tet_idx[:n_targets]
+    if n_targets > top_tet_idx.shape[0]:
+        # Cycle through targets
+        repeats = (n_targets + top_tet_idx.shape[0] - 1) // top_tet_idx.shape[0]
+        target_tets = top_tet_idx.repeat(repeats)[:n_targets]
+
+    # Compute target positions (tet centroids) and attributes (vertex averages)
+    target_tet_verts = indices[target_tets]  # (K, 4)
+    verts = model.vertices
+    target_pos = verts[target_tet_verts].mean(dim=1)  # (K, 3)
+
+    # Add small random offset to avoid exact duplicates
+    target_pos = target_pos + torch.randn_like(target_pos) * 0.01
+
+    target_sigma = model.sigma.data[target_tet_verts].mean(dim=1)
+    target_rgb = model.rgb.data[target_tet_verts].mean(dim=1)
+    target_sh = model.sh.data[target_tet_verts].mean(dim=1)
+
+    print(f"MCMC: relocating {n_targets} dead vertices "
+          f"(dead: {n_dead}, contrib<{args.clone_min_contrib:.4f}, density<0.01) "
+          f"to {top_tet_idx.shape[0]} high-error tet centroids")
+
+    tet_optim.relocate_vertices(relocate_idx, target_pos, target_sigma, target_rgb, target_sh)
+    return n_targets
+
+
+@torch.no_grad()
 def apply_vertex_densification(
     stats: RenderStats,
     model,
