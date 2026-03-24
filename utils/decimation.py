@@ -1,10 +1,42 @@
 """
-Vectorized edge-star decimation for Delaunay meshes.
+Edge-collapse decimation for Delaunay tetrahedral meshes.
 
-Implements the `len_over_rgb_std` heuristic:
-    score = edge_length / (edge_star_rgb_std + eps)
+## Purpose
 
-Low-score edges (short, in uniform RGB regions) are collapsed first.
+Decimation removes vertices that don't contribute meaningfully to rendering
+quality. After densification adds vertices at high-error regions, some
+existing vertices become redundant — they sit in uniform-color or
+transparent regions where fewer vertices would produce the same output.
+Removing them frees vertex budget for more useful placements.
+
+## Scoring heuristic: len_over_rgb_std
+
+    score = edge_length / (rgb_std + eps) * density_weight
+
+Low-score edges are collapsed first. The score favors collapsing:
+  - Short edges (small geometric contribution)
+  - In uniform RGB regions (low color variation across adjacent tets)
+  - With low density (transparent, not visible)
+
+High-score edges are protected: long edges at color boundaries in opaque
+regions carry important detail.
+
+## Edge collapse mechanics
+
+For each selected edge (va, vb):
+  1. Move va to midpoint (va + vb) / 2
+  2. Remove vb from the mesh
+  3. The optimizer's Adam state for va is preserved; vb's state is discarded
+
+After all collapses, `update_triangulation()` rebuilds the Delaunay to
+restore valid sorting order. This is a single Delaunay for the entire
+batch of collapses.
+
+## Conflict resolution
+
+Edges sharing a vertex can't both be collapsed. A greedy strategy processes
+edges in score order, skipping any edge whose vertices were already claimed
+by a prior collapse. Only interior vertices (not boundary) are collapsed.
 """
 
 import torch

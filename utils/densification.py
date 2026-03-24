@@ -1,3 +1,59 @@
+"""
+Densification and refinement pipelines for the tetrahedral mesh.
+
+## Why densification needs retriangulation
+
+The tile-based rasterizer sorts tetrahedra by depth per tile. This sorting
+requires a valid Delaunay triangulation — if the tet topology doesn't match
+the vertex positions, tets overlap incorrectly and rendering breaks. Any
+operation that adds or moves vertices must be followed by a Delaunay
+retriangulation to restore correct sorting order.
+
+## The refinement pipeline
+
+Refinement (`refine_bad_tets`) inserts vertices at circumcenters of
+poor-quality tetrahedra. Its purpose is NOT to add model capacity — it's to
+**maintain triangulation quality** so that the Delaunay produces well-shaped
+tets that sort and render correctly. Without refinement, densification can
+create sliver tets that cause rendering artifacts.
+
+The pipeline after each densification event:
+  1. Densification adds vertices at error-targeted locations → Delaunay
+  2. Refinement inserts vertices at bad-quality tets → Delaunay (fixes slivers)
+  3. Decimation removes redundant vertices → Delaunay (frees budget)
+
+Each step triggers a Delaunay retriangulation. Each retriangulation changes
+the tet topology, which disrupts the learned vertex attribute interpolation
+by ~0.1-0.5 dB. The cost is cumulative — more events = more disruption.
+
+## Decimation
+
+Decimation (`apply_decimation`) collapses edges to remove vertices that
+contribute little to rendering quality. Its purpose is to **free vertex
+budget** by removing vertices in uniform/transparent regions, making room
+for vertices in high-detail regions. The scoring heuristic
+`edge_length / (rgb_std + eps)` prioritizes short edges in uniform-color
+regions, weighted by density to protect opaque surfaces.
+
+## MCMC relocation
+
+MCMC relocation (`apply_mcmc_relocation`) combines decimation scoring with
+error targeting: it identifies expendable vertices (via decimation heuristic)
+and teleports them to high-error locations (via render stats). This
+redistributes vertices without changing the total count. It still requires
+Delaunay because vertex positions change.
+
+## Measured costs (at 400-500k vertices, 20-min budget)
+
+Operation              | PSNR disruption | Wall time | Notes
+-----------------------|-----------------|-----------|------
+Densification+Delaunay | ~0 (new verts)  | ~25s      | New verts start at interpolated attrs
+Refine+Delaunay        | -0.1 to -0.6 dB | ~0.5s     | Topology change hurts; diminishing returns at scale
+Decimation+Delaunay    | -0.0 to -0.1 dB | ~1s       | Removing redundant verts is cheap
+MCMC+Delaunay          | -0.0 to -0.1 dB | ~20s      | Nearly free at 2% relocation rate
+Delaunay alone (187ms) | -0.1 to -0.3 dB | ~0.2s     | Topology disruption, not compute, is the cost
+"""
+
 import gc
 import cv2
 import torch

@@ -53,6 +53,17 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **The goal is to get the highest PSNR and to deeply understand *why* each change helps or hurts.** Since the time budget is fixed, you don't need to worry about training time — it's always 10 minutes. Everything is fair game.
 
+## Mesh Management Pipelines
+
+The tile-based rasterizer sorts tets by depth — **this requires a valid Delaunay triangulation**. Any vertex change (add, remove, move) must be followed by Delaunay retriangulation. Delaunay itself is fast (~200ms) but **topology disruption** costs ~0.1-0.5 dB per retriangulation. Each event's cost is cumulative.
+
+- **Densification** (`apply_densification`): Adds vertices at centroids of high-error tets (from `collect_render_stats`). Attributes initialized as average of 4 corners. → Delaunay.
+- **Refinement** (`refine_bad_tets`): Inserts vertices at circumcenters of sliver tets to fix mesh quality. → Delaunay. Purpose is maintaining triangulation quality for correct sorting, not adding capacity.
+- **Decimation** (`apply_decimation`): Collapses low-scoring edges (short + uniform color + low density) to remove redundant vertices and free budget. → Delaunay.
+- **MCMC relocation** (`apply_mcmc_relocation`): Identifies expendable vertices via decimation scoring, teleports them to high-error locations. Same vertex count, but positions change. → Delaunay.
+
+See `utils/densification.py` and `utils/decimation.py` for detailed documentation.
+
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful PSNR gains, but it should not blow up dramatically.
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win.
