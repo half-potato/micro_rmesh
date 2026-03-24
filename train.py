@@ -100,9 +100,9 @@ args.contrib_threshold = 0.0
 args.threshold_start = 2500
 args.voxel_size = 0.01
 
-# Decimation Settings — after densification and MCMC
+# Decimation Settings — after each topology change
 args.decimate_start = 450
-args.decimate_end = 950
+args.decimate_end = 1500
 args.decimate_interval = 100
 args.decimate_count = 5000
 args.decimate_threshold = 0.0
@@ -152,7 +152,7 @@ total_training_time = 0
 step = 0
 
 # Upfront densification: add perturbed copies of initial vertices
-init_upsample = 4  # 4x upfront then error-targeted densification at step 400
+init_upsample = 8  # 8x upfront (411k) + error densify to fill toward 1M
 if init_upsample > 1:
     with torch.no_grad():
         n_int = model.interior_vertices.shape[0]
@@ -198,12 +198,12 @@ while True:
     torch.cuda.synchronize()
     t0 = time.time()
     do_delaunay = False
-    # Error-targeted densification at step 400 + MCMC relocation at step 700
-    do_cloning = (step == 400 and model.vertices.shape[0] < test_util.VERT_BUDGET)
-    do_mcmc = (step == 700)
+    # Error-targeted densification at steps 400 and 1200 + MCMC at 800
+    do_cloning = (step in [400, 1200] and model.vertices.shape[0] < test_util.VERT_BUDGET)
+    do_mcmc = (step == 800)
     do_grad_densify = False
-    # Refine+decimate after densification AND after MCMC
-    do_refine = (step in [500, 600, 800, 900]
+    # Refine+decimate after each topology change
+    do_refine = (step in [500, 600, 900, 1000, 1300, 1400]
                  and model.vertices.shape[0] < test_util.VERT_BUDGET)
     do_sh_up = not args.sh_interval == 0 and step % args.sh_interval == 0 and step > 0
     do_sh_step = step % args.sh_step == 0
@@ -325,7 +325,7 @@ while True:
             model.eval()
             stats = collect_render_stats(sampled_cams, model, args, device)
             model.train()
-            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 50000)
+            target_addition = min(test_util.VERT_BUDGET - model.vertices.shape[0], 200000)
 
             apply_densification(
                 stats,

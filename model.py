@@ -2509,14 +2509,20 @@ class VertexOptimizer:
         insert_pts[outside] = p[selected[outside]].mean(dim=1)  # use centroid instead
 
         # Filter out points too close to existing vertices
+        # Use chunked nearest-neighbor to avoid OOM on large meshes
         min_dist_sq = 1e-4
         existing = verts.detach()
         keep = torch.ones(k, dtype=torch.bool, device=verts.device)
-        chunk = 2048
-        for s in range(0, k, chunk):
-            e = min(s + chunk, k)
-            d = (insert_pts[s:e].unsqueeze(1) - existing.unsqueeze(0)).pow(2).sum(-1).min(dim=1).values
-            keep[s:e] = d > min_dist_sq
+        chunk_q = 512  # query chunk
+        chunk_db = 50000  # database chunk
+        for s in range(0, k, chunk_q):
+            e = min(s + chunk_q, k)
+            min_d = torch.full((e - s,), float('inf'), device=verts.device)
+            for ds in range(0, existing.shape[0], chunk_db):
+                de = min(ds + chunk_db, existing.shape[0])
+                d = (insert_pts[s:e].unsqueeze(1) - existing[ds:de].unsqueeze(0)).pow(2).sum(-1).min(dim=1).values
+                min_d = torch.minimum(min_d, d)
+            keep[s:e] = min_d > min_dist_sq
         selected = selected[keep]
         sel_verts = indices[selected]
         insert_pts = insert_pts[keep]
